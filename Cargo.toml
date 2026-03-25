@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
 arrow = "53"
 parquet = "53"
 
-pyo3 = { version = "0.22", features = ["extension-module"] }
-numpy = "0.22"
+pyo3 = { version = "0.28.2", features = ["abi3-py38"] }
+numpy = "0.28.0"
 
 crossbeam-channel = "0.5"
 

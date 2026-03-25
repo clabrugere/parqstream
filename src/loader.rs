@@ -4,6 +4,7 @@ use std::thread;
 use crossbeam_channel::{bounded, Receiver};
 use pyo3::exceptions::{PyStopIteration, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use rand::prelude::*;
 
 use crate::batch::Batch;
@@ -150,7 +151,10 @@ impl DataLoader {
     }
 
     /// Return the next batch as `dict[str, np.ndarray]`, or raise `StopIteration` when the pipeline is exhausted.
-    pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn __next__<'py>(
+        mut slf: PyRefMut<'_, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyDict>> {
         let rx = match slf.batch_rx.take() {
             Some(rx) => rx,
             None => {
@@ -159,19 +163,18 @@ impl DataLoader {
         };
 
         // Release the GIL while waiting for the next batch.
-        let result = py.allow_threads(|| rx.recv());
+        let result = py.detach(|| rx.recv());
 
         match result {
             Ok(batch) => {
                 // Put the receiver back so the next call works.
                 slf.batch_rx = Some(rx);
-                let dict = batch.to_pydict(py)?;
-                Ok(dict.into_py(py))
+                Ok(batch.to_pydict(py)?)
             }
             Err(_) => {
-                // Channel closed — iteration complete.
+                // Channel closed: iteration complete.
                 slf.batch_rx = None;
-                Err(PyStopIteration::new_err("stop iteration"))
+                Err(PyStopIteration::new_err("dataloader consumed"))
             }
         }
     }

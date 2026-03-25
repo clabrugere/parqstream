@@ -15,7 +15,7 @@ impl Batch {
     /// Export the batch to Python as `dict[str, np.ndarray]`
     /// Supported dtypes: bool, i32, i64, f32, f64, utf8 (object array)
     pub fn to_pydict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         let schema = self.0.schema();
         let arrays = self.0.columns();
 
@@ -28,37 +28,37 @@ impl Batch {
     }
 }
 
-fn array_to_numpy<'py>(py: Python<'py>, array: &dyn Array, name: &str) -> PyResult<PyObject> {
+fn array_to_numpy<'py>(py: Python<'py>, array: &dyn Array, name: &str) -> PyResult<Py<PyAny>> {
     match array.data_type() {
         DataType::Float32 => {
             let a = array.as_any().downcast_ref::<Float32Array>().unwrap();
-            Ok(slice_to_numpy_f32(py, a).into_py(py))
+            Ok(slice_to_numpy_f32(py, a).into_any().unbind())
         }
         DataType::Float64 => {
             let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            Ok(slice_to_numpy_f64(py, a).into_py(py))
+            Ok(slice_to_numpy_f64(py, a).into_any().unbind())
         }
         DataType::Int32 => {
             let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
-            Ok(slice_to_numpy_i32(py, a).into_py(py))
+            Ok(slice_to_numpy_i32(py, a).into_any().unbind())
         }
         DataType::Int64 => {
             let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            Ok(slice_to_numpy_i64(py, a).into_py(py))
+            Ok(slice_to_numpy_i64(py, a).into_any().unbind())
         }
         DataType::Boolean => {
             let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
             // Boolean arrays are bit-packed in Arrow; collect to Vec<bool> then to numpy.
             let v: Vec<bool> = (0..a.len()).map(|i| a.value(i)).collect();
-            Ok(v.to_pyarray_bound(py).into_py(py))
+            Ok(v.to_pyarray(py).into_any().unbind())
         }
         DataType::Utf8 => {
             let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-            let list = PyList::new_bound(py, (0..a.len()).map(|i| a.value(i)));
+            let list = PyList::new(py, (0..a.len()).map(|i| a.value(i)))?;
             // Convert to numpy object array via numpy.asarray().
-            let numpy = py.import_bound("numpy")?;
+            let numpy = py.import("numpy")?;
             let obj_arr = numpy.call_method1("asarray", (list,))?;
-            Ok(obj_arr.into_py(py))
+            Ok(obj_arr.unbind())
         }
         dt => Err(Error::UnsupportedDtype {
             name: name.to_owned(),
@@ -73,23 +73,23 @@ fn array_to_numpy<'py>(py: Python<'py>, array: &dyn Array, name: &str) -> PyResu
 fn slice_to_numpy_f32<'py>(py: Python<'py>, a: &Float32Array) -> Bound<'py, PyArray1<f32>> {
     let buf = a.values();
     let s = &buf.as_ref()[a.offset()..a.offset() + a.len()];
-    PyArray1::from_slice_bound(py, s)
+    PyArray1::from_slice(py, s)
 }
 
 fn slice_to_numpy_f64<'py>(py: Python<'py>, a: &Float64Array) -> Bound<'py, PyArray1<f64>> {
     let buf = a.values();
     let s = &buf.as_ref()[a.offset()..a.offset() + a.len()];
-    PyArray1::from_slice_bound(py, s)
+    PyArray1::from_slice(py, s)
 }
 
 fn slice_to_numpy_i32<'py>(py: Python<'py>, a: &Int32Array) -> Bound<'py, PyArray1<i32>> {
     let buf = a.values();
     let s = &buf.as_ref()[a.offset()..a.offset() + a.len()];
-    PyArray1::from_slice_bound(py, s)
+    PyArray1::from_slice(py, s)
 }
 
 fn slice_to_numpy_i64<'py>(py: Python<'py>, a: &Int64Array) -> Bound<'py, PyArray1<i64>> {
     let buf = a.values();
     let s = &buf.as_ref()[a.offset()..a.offset() + a.len()];
-    PyArray1::from_slice_bound(py, s)
+    PyArray1::from_slice(py, s)
 }
