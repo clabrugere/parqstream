@@ -45,12 +45,11 @@ impl Batch {
     }
 
     fn column(&self, name: &str) -> PyResult<Column> {
-        let idx = self
+        let array = self
             .data
-            .schema()
-            .index_of(name)
-            .map_err(|_| PyKeyError::new_err(format!("no column '{name}'")))?;
-        Ok(Column::new(self.data.column(idx).clone()))
+            .column_by_name(name)
+            .ok_or_else(|| PyKeyError::new_err(format!("no column '{name}'")))?;
+        Ok(Column::new(array.clone()))
     }
 
     fn __len__(&self) -> usize {
@@ -68,7 +67,7 @@ impl Column {
         _requested_schema: Option<Bound<'py, PyAny>>,
     ) -> PyResult<(Bound<'py, PyCapsule>, Bound<'py, PyCapsule>)> {
         let (ffi_array, ffi_schema) = ffi::to_ffi(&self.array.to_data())
-            .map_err(|e: arrow::error::ArrowError| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let schema_cap =
             PyCapsule::new(py, ffi_schema, Some(CString::new("arrow_schema").unwrap()))?;
