@@ -77,7 +77,7 @@ pub fn read_batch(
         }
     }
 
-    let batch = if record_batches.is_empty() {
+    let record_batch = if record_batches.is_empty() {
         // Return an empty batch with the correct schema
         RecordBatch::new_empty(projected_schema)
     } else {
@@ -85,7 +85,7 @@ pub fn read_batch(
         concat_batches(&projected_schema, &record_batches)?
     };
 
-    Ok(Batch(batch))
+    Ok(Batch::new(record_batch))
 }
 
 /// Build a `RowSelection` that selects `sorted_local_indices` (must be sorted and deduplicated) from a row group.

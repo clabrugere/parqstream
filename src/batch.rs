@@ -9,15 +9,21 @@ use pyo3::types::{PyDict, PyList};
 
 use crate::error::Error;
 
-pub struct Batch(pub RecordBatch);
+pub struct Batch {
+    data: RecordBatch,
+}
 
 impl Batch {
+    pub fn new(record_batch: RecordBatch) -> Self {
+        Self { data: record_batch }
+    }
+
     /// Export the batch to Python as `dict[str, np.ndarray]`
     /// Supported dtypes: bool, i32, i64, f32, f64, utf8 (object array)
     pub fn to_pydict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
-        let schema = self.0.schema();
-        let arrays = self.0.columns();
+        let schema = self.data.schema();
+        let arrays = self.data.columns();
 
         for (field, array) in schema.fields().iter().zip(arrays) {
             let np_array = array_to_numpy(py, array, field.name())?;
