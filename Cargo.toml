@@ -1,0 +1,26 @@
+[package]
+name = "parqstream"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "parqstream"
+crate-type = ["cdylib"]
+
+[dependencies]
+arrow = "53"
+parquet = "53"
+
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
+
+crossbeam-channel = "0.5"
+
+rand = "0.10"
+
+thiserror = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

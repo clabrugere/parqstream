@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "parqstream"
+version = "0.1.0"
+description = "High-performance tabular dataloader for deep learning"
+requires-python = ">=3.11,<3.14"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+dev = ["maturin", "pytest", "pyarrow", "torch"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "parqstream._parqstream"
