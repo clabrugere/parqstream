@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use arrow::datatypes::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::error::{Error, Result};
@@ -125,9 +124,6 @@ impl Dataset {
 impl Dataset {
     #[new]
     pub fn py_new(paths: Vec<String>) -> PyResult<Self> {
-        if paths.is_empty() {
-            return Err(PyValueError::new_err("at least one file is required"));
-        }
         Ok(Self::from_files(paths)?)
     }
 
