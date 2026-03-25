@@ -90,4 +90,4 @@ def test_torch_from_numpy_zero_copy(parquet_path):
         with pytest.warns(UserWarning, match="The given NumPy array is not writable") as record:
             _ = torch.from_numpy(batch["f1"])
 
-    assert len(record) == 1
+        assert len(record) == 1
