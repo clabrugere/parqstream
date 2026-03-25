@@ -7,10 +7,10 @@ name = "parqstream"
 version = "0.1.0"
 description = "High-performance tabular dataloader for deep learning"
 requires-python = ">=3.11,<3.14"
-dependencies = ["numpy"]
+dependencies = ["numpy", "pyarrow"]
 
 [project.optional-dependencies]
-dev = ["maturin", "pytest", "pyarrow", "torch"]
+dev = ["maturin", "pytest", "torch"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }

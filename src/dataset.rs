@@ -18,15 +18,33 @@ pub struct RowGroupMeta {
 
 /// Reads only footer metadata at construction time, no data is loaded until `read_batch` is called.
 /// RowGroupIndex flatten the parquet files to allow for random row access in the whole dataset
-#[pyclass]
+#[pyclass(from_py_object)]
+#[derive(Clone)]
 pub struct Dataset {
     pub files: Vec<PathBuf>,
     pub schema: SchemaRef,
     pub row_group_index: Vec<RowGroupMeta>,
     pub total_rows: usize,
+    columns: Vec<String>,
 }
 
 impl Dataset {
+    pub fn new(
+        files: Vec<PathBuf>,
+        schema: SchemaRef,
+        row_group_index: Vec<RowGroupMeta>,
+        total_rows: usize,
+    ) -> Self {
+        let columns = schema.fields().iter().map(|f| f.name().clone()).collect();
+        Self {
+            files,
+            schema,
+            row_group_index,
+            total_rows,
+            columns,
+        }
+    }
+
     /// Open `paths` as a single logical dataset and validates that all files share the same schema.
     pub fn open(paths: Vec<String>) -> Result<Self> {
         if paths.is_empty() {
@@ -78,11 +96,15 @@ impl Dataset {
             files.push(path.into());
         }
 
+        let schema = schema.unwrap(); // guaranteed by non-empty paths check
+        let columns = schema.fields().iter().map(|f| f.name().clone()).collect();
+
         Ok(Self {
             files,
-            schema: schema.unwrap(),
+            schema,
             row_group_index,
             total_rows,
+            columns,
         })
     }
 
@@ -122,12 +144,8 @@ impl Dataset {
     }
 
     #[getter]
-    pub fn column_names(&self) -> Vec<String> {
-        self.schema
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect()
+    pub fn columns(&self) -> Vec<String> {
+        self.columns.clone()
     }
 
     #[getter]
@@ -147,9 +165,7 @@ impl Dataset {
     pub fn __repr__(&self) -> String {
         format!(
             "Dataset(files={:?}, rows={}, columns={:?})",
-            self.files,
-            self.total_rows,
-            self.schema.fields(),
+            self.files, self.total_rows, self.columns,
         )
     }
 }

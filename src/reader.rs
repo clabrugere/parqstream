@@ -6,7 +6,6 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
 use parquet::arrow::ProjectionMask;
 
-use crate::batch::Batch;
 use crate::dataset::Dataset;
 use crate::error::{Error, Result};
 
@@ -21,7 +20,7 @@ pub fn read_batch(
     dataset: &Dataset,
     global_indices: &[usize],
     columns: &[String],
-) -> Result<Batch> {
+) -> Result<RecordBatch> {
     // Group sorted indices by (file_idx, row_group_idx)
     let mut groups: HashMap<(usize, usize), BinaryHeap<usize>> = HashMap::new();
     for &global in global_indices {
@@ -35,7 +34,7 @@ pub fn read_batch(
     // Read each (file, row_group) and collect RecordBatches
     let col_indices = dataset.column_indices(columns)?;
     let projected_schema = std::sync::Arc::new(dataset.schema.project(&col_indices)?);
-    let mut record_batches = Vec::with_capacity(groups.len());
+    let mut batches = Vec::with_capacity(groups.len());
 
     for ((file_idx, rg_idx), local_rows) in groups {
         let path = &dataset.files[file_idx];
@@ -73,19 +72,19 @@ pub fn read_batch(
 
         // Collect all RecordBatches
         for rb in &mut reader {
-            record_batches.push(rb?);
+            batches.push(rb?);
         }
     }
 
-    let record_batch = if record_batches.is_empty() {
+    let batch = if batches.is_empty() {
         // Return an empty batch with the correct schema
         RecordBatch::new_empty(projected_schema)
     } else {
         // Concatenate batches from different row groups into a single batch.
-        concat_batches(&projected_schema, &record_batches)?
+        concat_batches(&projected_schema, &batches)?
     };
 
-    Ok(Batch::new(record_batch))
+    Ok(batch)
 }
 
 /// Build a `RowSelection` that selects `sorted_local_indices` (must be sorted and deduplicated) from a row group.

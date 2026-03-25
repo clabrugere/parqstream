@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-use arrow::datatypes::DataType;
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::PyErr;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,9 +36,6 @@ pub enum Error {
     #[error("column '{name}' not found in schema")]
     ColumnNotFound { name: String },
 
-    #[error("unsupported dtype for column '{name}': {dtype:?}")]
-    UnsupportedDtype { name: String, dtype: DataType },
-
     #[error(transparent)]
     Arrow(#[from] arrow::error::ArrowError),
 }
@@ -53,7 +49,6 @@ impl From<Error> for PyErr {
                 PyValueError::new_err(e.to_string())
             }
             Error::ColumnNotFound { .. } => PyKeyError::new_err(e.to_string()),
-            Error::UnsupportedDtype { .. } => PyTypeError::new_err(e.to_string()),
             _ => PyRuntimeError::new_err(e.to_string()),
         }
     }

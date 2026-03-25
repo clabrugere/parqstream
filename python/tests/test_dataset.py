@@ -11,7 +11,7 @@ def test_open_single_file(parquet_path):
 
 def test_column_names(parquet_path):
     ds = Dataset([parquet_path])
-    assert set(ds.column_names) == {"label", "f1", "f2", "weight", "id"}
+    assert set(ds.columns) == {"label", "f1", "f2", "weight", "id"}
 
 
 def test_open_multiple_files(two_parquet_paths):

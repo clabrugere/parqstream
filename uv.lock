@@ -218,12 +218,12 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
+    { name = "pyarrow" },
 ]
 
 [package.optional-dependencies]
 dev = [
     { name = "maturin" },
-    { name = "pyarrow" },
     { name = "pytest" },
     { name = "torch", version = "2.11.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
@@ -233,7 +233,7 @@ dev = [
 requires-dist = [
     { name = "maturin", marker = "extra == 'dev'" },
     { name = "numpy" },
-    { name = "pyarrow", marker = "extra == 'dev'" },
+    { name = "pyarrow" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "torch", marker = "extra == 'dev'", index = "https://download.pytorch.org/whl/cpu" },
 ]

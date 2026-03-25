@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import torch
 from parqstream import DataLoader, Dataset
 
 
@@ -38,7 +39,7 @@ def test_all_columns_default(parquet_path):
     loader = DataLoader(ds, batch_size=128, num_steps=4)
 
     for batch in loader:
-        assert set(batch.keys()) == set(ds.column_names)
+        assert set(batch.keys()) == set(ds.columns)
 
 
 def test_multi_file(two_parquet_paths):
@@ -69,14 +70,24 @@ def test_large_prefetch(parquet_path):
     assert sum(1 for _ in loader) == 9
 
 
-def test_torch_from_numpy(parquet_path):
-    torch = pytest.importorskip("torch")
-
+def test_torch_tensor(parquet_path):
     ds = Dataset([parquet_path])
     loader = DataLoader(ds, batch_size=256, num_steps=4, columns=["f1", "label"])
 
     for batch in loader:
-        x = torch.from_numpy(batch["f1"])
-        y = torch.from_numpy(batch["label"])
+        x = torch.from_numpy(batch["f1"].copy())
+        y = torch.from_numpy(batch["label"].copy())
+
         assert x.dtype == torch.float32
         assert y.dtype == torch.int32
+
+
+def test_torch_from_numpy_zero_copy(parquet_path):
+    ds = Dataset([parquet_path])
+    loader = DataLoader(ds, batch_size=256, num_steps=1, columns=["f1"])
+
+    for batch in loader:
+        with pytest.warns(UserWarning, match="The given NumPy array is not writable") as record:
+            _ = torch.from_numpy(batch["f1"])
+
+    assert len(record) == 1

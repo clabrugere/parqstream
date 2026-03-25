@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::thread;
 
+use arrow::record_batch::RecordBatch;
 use crossbeam_channel::{bounded, Receiver};
 use pyo3::exceptions::{PyStopIteration, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use rand::prelude::*;
 
 use crate::batch::Batch;
@@ -28,12 +28,12 @@ pub struct DataLoader {
     num_workers: usize,
     prefetch_factor: usize,
     // Set when iteration starts, cleared on exhaustion
-    batch_rx: Option<Receiver<Batch>>,
+    batch_rx: Option<Receiver<RecordBatch>>,
 }
 
 impl DataLoader {
     /// Spawn the feeder and worker threads and return the batch receiver
-    fn spawn_pipeline(&self) -> Receiver<Batch> {
+    fn spawn_pipeline(&self) -> Receiver<RecordBatch> {
         let dataset = self.dataset.clone();
         let batch_size = self.batch_size;
         let num_steps = self.num_steps;
@@ -44,7 +44,7 @@ impl DataLoader {
         // Index channel: feeder -> workers
         let (index_tx, index_rx) = bounded::<Vec<usize>>(num_workers * 2);
         // Batch channel: workers -> Python
-        let (batch_tx, batch_rx) = bounded::<Batch>(self.prefetch_factor);
+        let (batch_tx, batch_rx) = bounded::<RecordBatch>(self.prefetch_factor);
 
         // Generates uniform random index batches and feeds them to workers
         thread::spawn(move || {
@@ -123,18 +123,13 @@ impl DataLoader {
             return Err(PyValueError::new_err("prefetch_factor must be > 0"));
         }
 
-        let columns = columns.unwrap_or(dataset.column_names());
+        let columns = columns.unwrap_or(dataset.columns());
 
         // Validate columns exist.
         dataset.column_indices(&columns)?;
 
         Ok(Self {
-            dataset: Arc::new(Dataset {
-                files: dataset.files.clone(),
-                schema: dataset.schema.clone(),
-                row_group_index: dataset.row_group_index.clone(),
-                total_rows: dataset.total_rows,
-            }),
+            dataset: Arc::new(dataset.clone()),
             batch_size,
             num_steps,
             columns,
@@ -150,16 +145,11 @@ impl DataLoader {
         slf
     }
 
-    /// Return the next batch as `dict[str, np.ndarray]`, or raise `StopIteration` when the pipeline is exhausted.
-    pub fn __next__<'py>(
-        mut slf: PyRefMut<'_, Self>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    /// Return the next `Batch`, or raise `StopIteration` when the pipeline is exhausted.
+    pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Batch> {
         let rx = match slf.batch_rx.take() {
             Some(rx) => rx,
-            None => {
-                return Err(PyStopIteration::new_err("not started"));
-            }
+            None => return Err(PyStopIteration::new_err("not started")),
         };
 
         // Release the GIL while waiting for the next batch.
@@ -167,9 +157,8 @@ impl DataLoader {
 
         match result {
             Ok(batch) => {
-                // Put the receiver back so the next call works.
                 slf.batch_rx = Some(rx);
-                Ok(batch.to_pydict(py)?)
+                Ok(Batch::new(batch))
             }
             Err(_) => {
                 // Channel closed: iteration complete.

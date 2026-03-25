@@ -6,6 +6,7 @@ mod reader;
 
 use pyo3::prelude::*;
 
+use batch::{Batch, Column};
 use dataset::Dataset;
 use loader::DataLoader;
 
@@ -13,5 +14,7 @@ use loader::DataLoader;
 fn _parqstream(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Dataset>()?;
     m.add_class::<DataLoader>()?;
+    m.add_class::<Batch>()?;
+    m.add_class::<Column>()?;
     Ok(())
 }
