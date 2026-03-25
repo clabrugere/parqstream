@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use arrow::datatypes::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::error::{Error, Result};
@@ -29,24 +30,8 @@ pub struct Dataset {
 }
 
 impl Dataset {
-    pub fn new(
-        files: Vec<PathBuf>,
-        schema: SchemaRef,
-        row_group_index: Vec<RowGroupMeta>,
-        total_rows: usize,
-    ) -> Self {
-        let columns = schema.fields().iter().map(|f| f.name().clone()).collect();
-        Self {
-            files,
-            schema,
-            row_group_index,
-            total_rows,
-            columns,
-        }
-    }
-
-    /// Open `paths` as a single logical dataset and validates that all files share the same schema.
-    pub fn open(paths: Vec<String>) -> Result<Self> {
+    /// Construct a single logical dataset from `paths`, while validating that all files share the same schema.
+    pub fn from_files(paths: Vec<String>) -> Result<Self> {
         if paths.is_empty() {
             return Err(Error::EmptyPaths);
         }
@@ -140,7 +125,10 @@ impl Dataset {
 impl Dataset {
     #[new]
     pub fn py_new(paths: Vec<String>) -> PyResult<Self> {
-        Ok(Self::open(paths)?)
+        if paths.is_empty() {
+            return Err(PyValueError::new_err("at least one file is required"));
+        }
+        Ok(Self::from_files(paths)?)
     }
 
     #[getter]
