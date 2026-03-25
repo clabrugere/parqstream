@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 
 /// Read a batch of rows from `dataset` identified by `global_indices`.
 ///
-/// Rows are grouped by (file, row_group) to minimize seeks.
+/// Rows are grouped by `(file, row_group)` to minimize seeks.
 /// The output batch may contain rows in a different order than `global_indices` (sorted by file then row group)
 ///
 /// Duplicate indices within the same row group are deduplicated (`RowSelection` selects each row exactly once).

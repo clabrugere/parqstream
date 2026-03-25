@@ -17,7 +17,7 @@ pub struct RowGroupMeta {
 }
 
 /// Reads only footer metadata at construction time, no data is loaded until `read_batch` is called.
-/// RowGroupIndex flatten the parquet files to allow for random row access in the whole dataset
+/// `RowGroupIndex` flattens the parquet files to allow for random row access in the whole dataset
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct Dataset {
@@ -25,7 +25,7 @@ pub struct Dataset {
     pub schema: SchemaRef,
     pub row_group_index: Vec<RowGroupMeta>,
     pub total_rows: usize,
-    columns: Vec<String>,
+    pub columns: Vec<String>,
 }
 
 impl Dataset {
@@ -67,7 +67,7 @@ impl Dataset {
             // Index all row groups.
             let metadata = builder.metadata();
             for rg_idx in 0..metadata.num_row_groups() {
-                let num_rows = metadata.row_group(rg_idx).num_rows() as usize;
+                let num_rows = usize::try_from(metadata.row_group(rg_idx).num_rows())?;
                 row_group_index.push(RowGroupMeta {
                     file_idx,
                     row_group_idx: rg_idx,
@@ -92,7 +92,7 @@ impl Dataset {
         })
     }
 
-    /// Find the RowGroupMeta that contains `global_row` and return it along with the local row index within that group
+    /// Find the `RowGroupMeta` that contains `global_row` and return it along with the local row index within that group
     pub fn locate_row(&self, global_row: usize) -> (&RowGroupMeta, usize) {
         // Binary search on row_offset.
         let idx = self
@@ -104,17 +104,26 @@ impl Dataset {
         (meta, local)
     }
 
-    /// Resolve `columns` to their indices in the Arrow schema, sorted by schema order.
-    /// Returns an error if any column name is not found.
+    // Validate that all column names exist in the schema, returning an error if any is missing.
+    pub fn validate_columns(&self, columns: &[String]) -> Result<()> {
+        for name in columns {
+            self.schema
+                .index_of(name)
+                .map_err(|_| Error::ColumnNotFound { name: name.clone() })?;
+        }
+        Ok(())
+    }
+
+    /// Resolve `columns` to their indices in the schema, sorted by schema order, returning an error if any is missing.
     pub fn column_indices(&self, columns: &[String]) -> Result<Vec<usize>> {
-        let mut indices: Vec<usize> = columns
+        let mut indices = columns
             .iter()
             .map(|name| {
                 self.schema
                     .index_of(name)
                     .map_err(|_| Error::ColumnNotFound { name: name.clone() })
             })
-            .collect::<Result<_>>()?;
+            .collect::<Result<Vec<usize>>>()?;
         indices.sort_unstable();
         Ok(indices)
     }

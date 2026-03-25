@@ -60,7 +60,7 @@ impl Batch {
 
 #[pymethods]
 impl Column {
-    /// Arrow PyCapsule Interface.
+    /// Arrow `PyCapsule` Interface.
     /// Returns `(schema_capsule, array_capsule)` per the Arrow specification.
     fn __arrow_c_array__<'py>(
         &self,

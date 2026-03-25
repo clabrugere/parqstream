@@ -31,8 +31,8 @@ class DataLoader:
         num_workers: int = 4,
         prefetch_factor: int = 4,
     ) -> None:
-        self._inner = _RustDataLoader(
-            dataset._inner,
+        self._dataloader = _RustDataLoader(
+            dataset._dataset,
             batch_size,
             num_steps,
             columns,
@@ -41,37 +41,37 @@ class DataLoader:
         )
 
     def __iter__(self) -> DataLoader:
-        iter(self._inner)
+        iter(self._dataloader)
         return self
 
     def __next__(self) -> dict[str, np.ndarray]:
-        batch = next(self._inner)
+        batch = next(self._dataloader)
         return {name: _col_to_numpy(batch.column(name)) for name in batch.columns}
 
     def __repr__(self) -> str:
-        return repr(self._inner)
+        return repr(self._dataloader)
 
 
 class Dataset:
     """Dataset representing distributed over one or more Parquet files only read as needed."""
 
     def __init__(self, paths: list[str]) -> None:
-        self._inner = _RustDataset(paths)
+        self._dataset = _RustDataset(paths)
 
     @property
     def columns(self) -> list[str]:
-        return self._inner.columns
+        return self._dataset.columns
 
     @property
     def num_files(self) -> int:
-        return self._inner.num_files
+        return self._dataset.num_files
 
     @property
     def num_row_groups(self) -> int:
-        return self._inner.num_row_groups
+        return self._dataset.num_row_groups
 
     def __len__(self) -> int:
-        return len(self._inner)
+        return len(self._dataset)
 
     def __repr__(self) -> str:
-        return repr(self._inner)
+        return repr(self._dataset)

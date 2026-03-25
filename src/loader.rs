@@ -123,10 +123,8 @@ impl DataLoader {
             return Err(PyValueError::new_err("prefetch_factor must be > 0"));
         }
 
-        let columns = columns.unwrap_or(dataset.columns());
-
-        // Validate columns exist.
-        dataset.column_indices(&columns)?;
+        let columns = columns.unwrap_or_else(|| dataset.columns.clone());
+        dataset.validate_columns(&columns)?;
 
         Ok(Self {
             dataset: Arc::new(dataset.clone()),
@@ -147,24 +145,21 @@ impl DataLoader {
 
     /// Return the next `Batch`, or raise `StopIteration` when the pipeline is exhausted.
     pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Batch> {
-        let rx = match slf.batch_rx.take() {
-            Some(rx) => rx,
-            None => return Err(PyStopIteration::new_err("not started")),
+        let Some(rx) = slf.batch_rx.take() else {
+            return Err(PyStopIteration::new_err("not started"));
         };
 
         // Release the GIL while waiting for the next batch.
         let result = py.detach(|| rx.recv());
 
-        match result {
-            Ok(batch) => {
-                slf.batch_rx = Some(rx);
-                Ok(Batch::new(batch))
-            }
-            Err(_) => {
-                // Channel closed: iteration complete.
-                slf.batch_rx = None;
-                Err(PyStopIteration::new_err("dataloader consumed"))
-            }
+        if let Ok(batch) = result {
+            // Put the receiver back for the next iteration.
+            slf.batch_rx = Some(rx);
+            Ok(Batch::new(batch))
+        } else {
+            // Channel closed: iteration complete.
+            slf.batch_rx = None;
+            Err(PyStopIteration::new_err("dataloader consumed"))
         }
     }
 

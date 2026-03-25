@@ -1,5 +1,10 @@
+use std::io::Error as IoError;
+use std::num::TryFromIntError;
 use std::path::PathBuf;
+use std::result::Result as StdResult;
 
+use arrow::error::ArrowError;
+use parquet::errors::ParquetError;
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::PyErr;
 
@@ -12,14 +17,14 @@ pub enum Error {
     OpenFile {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: IoError,
     },
 
     #[error("cannot read {path}")]
     ReadParquet {
         path: PathBuf,
         #[source]
-        source: parquet::errors::ParquetError,
+        source: ParquetError,
     },
 
     #[error("cannot build reader for row group {rg} in {path}")]
@@ -27,7 +32,7 @@ pub enum Error {
         path: PathBuf,
         rg: usize,
         #[source]
-        source: parquet::errors::ParquetError,
+        source: ParquetError,
     },
 
     #[error("schema mismatch: {path} has a different schema than the first file")]
@@ -36,11 +41,17 @@ pub enum Error {
     #[error("column '{name}' not found in schema")]
     ColumnNotFound { name: String },
 
+    #[error("cannot convert usize")]
+    TryFromInt {
+        #[from]
+        source: TryFromIntError,
+    },
+
     #[error(transparent)]
-    Arrow(#[from] arrow::error::ArrowError),
+    Arrow(#[from] ArrowError),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = StdResult<T, Error>;
 
 impl From<Error> for PyErr {
     fn from(e: Error) -> Self {
