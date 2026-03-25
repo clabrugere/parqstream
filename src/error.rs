@@ -41,11 +41,8 @@ pub enum Error {
     #[error("column '{name}' not found in schema")]
     ColumnNotFound { name: String },
 
-    #[error("cannot convert usize")]
-    TryFromInt {
-        #[from]
-        source: TryFromIntError,
-    },
+    #[error(transparent)]
+    TryFromInt(#[from] TryFromIntError),
 
     #[error(transparent)]
     Arrow(#[from] ArrowError),
