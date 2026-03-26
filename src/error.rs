@@ -10,6 +10,9 @@ use pyo3::PyErr;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("cannot determine the number of threads to use: {0}")]
+    ThreadDetermination(String),
+
     #[error("at least one file path is required")]
     EmptyPaths,
 
@@ -46,6 +49,9 @@ pub enum Error {
 
     #[error(transparent)]
     Arrow(#[from] ArrowError),
+
+    #[error("worker thread error: {0}")]
+    WorkerThread(String),
 }
 
 pub type Result<T> = StdResult<T, Error>;
