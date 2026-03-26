@@ -25,6 +25,7 @@ pub struct DataLoader {
     batch_size: usize,
     num_steps: usize,
     columns: Vec<String>,
+    shuffle: bool,
     num_workers: usize,
     prefetch_factor: usize,
     // Set when iteration starts, cleared on exhaustion
@@ -38,6 +39,7 @@ impl DataLoader {
         let batch_size = self.batch_size;
         let num_steps = self.num_steps;
         let columns = self.columns.clone();
+        let shuffle = self.shuffle;
         let num_workers = self.num_workers;
         let total_rows = self.dataset.total_rows;
 
@@ -46,15 +48,21 @@ impl DataLoader {
         // Batch channel: workers -> Python
         let (batch_tx, batch_rx) = bounded::<RecordBatch>(self.prefetch_factor);
 
-        // Generates uniform random index batches and feeds them to workers
+        // Generates index batches and feeds them to workers
         thread::spawn(move || {
             let mut rng = rand::rng();
-            for _ in 0..num_steps {
-                let indices = (0..batch_size)
-                    .map(|_| rng.random_range(0..total_rows))
-                    .collect();
+            for step in 0..num_steps {
+                let indices = if shuffle {
+                    (0..batch_size)
+                        .map(|_| rng.random_range(0..total_rows))
+                        .collect()
+                } else {
+                    (0..batch_size)
+                        .map(|i| (step * batch_size + i) % total_rows)
+                        .collect()
+                };
                 if index_tx.send(indices).is_err() {
-                    break; // workers have stopped (e.g. Python dropped the loader)
+                    break; // workers have stopped
                 }
             }
             // Dropping index_tx signals workers to exit
@@ -99,6 +107,7 @@ impl DataLoader {
         batch_size,
         num_steps,
         columns = None,
+        shuffle = false,
         num_workers = 4,
         prefetch_factor = 4,
     ))]
@@ -107,6 +116,7 @@ impl DataLoader {
         batch_size: usize,
         num_steps: usize,
         columns: Option<Vec<String>>,
+        shuffle: bool,
         num_workers: usize,
         prefetch_factor: usize,
     ) -> PyResult<Self> {
@@ -133,6 +143,7 @@ impl DataLoader {
             columns,
             num_workers,
             prefetch_factor,
+            shuffle,
             batch_rx: None,
         })
     }

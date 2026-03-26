@@ -91,3 +91,57 @@ def test_torch_from_numpy_zero_copy(parquet_path):
             _ = torch.from_numpy(batch["f1"])
 
         assert len(record) == 1
+
+
+def test_sequential_order(parquet_path):
+    ds = Dataset([parquet_path])
+    batch_size = 1_000
+    num_steps = 10
+
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        num_steps=num_steps,
+        columns=["id"],
+        shuffle=False,
+        num_workers=1,
+    )
+
+    all_ids = np.concatenate([batch["id"] for batch in loader])
+    assert np.array_equal(all_ids, np.arange(10_000, dtype=np.int64))
+
+
+def test_sequential_wraps_around(parquet_path):
+    ds = Dataset([parquet_path])
+    batch_size = 1_000
+    num_steps = 15
+
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        num_steps=num_steps,
+        columns=["id"],
+        shuffle=False,
+        num_workers=1,
+    )
+
+    all_ids = np.concatenate([batch["id"] for batch in loader])
+    expected = np.arange(15_000, dtype=np.int64) % 10_000
+    assert np.array_equal(all_ids, expected)
+
+
+def test_shuffle_ids_in_bounds(parquet_path):
+    ds = Dataset([parquet_path])
+
+    loader = DataLoader(
+        ds,
+        batch_size=1_000,
+        num_steps=10,
+        columns=["id"],
+        shuffle=True,
+    )
+
+    all_ids = np.concatenate([batch["id"] for batch in loader])
+    assert all_ids.min() >= 0
+    assert all_ids.max() < 10_000
+    assert len(all_ids) <= 10_000  # duplicates can exist because of random sampling with replacement

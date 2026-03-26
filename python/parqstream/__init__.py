@@ -28,6 +28,7 @@ class DataLoader:
         batch_size: int,
         num_steps: int,
         columns: list[str] | None = None,
+        shuffle: bool = False,
         num_workers: int = 4,
         prefetch_factor: int = 4,
     ) -> None:
@@ -36,6 +37,7 @@ class DataLoader:
             batch_size,
             num_steps,
             columns,
+            shuffle,
             num_workers,
             prefetch_factor,
         )
