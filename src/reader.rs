@@ -1,4 +1,4 @@
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 use std::fs::File;
 
 use arrow::compute::concat_batches;
@@ -8,12 +8,15 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection
 use crate::dataset::Dataset;
 use crate::error::{Error, Result};
 
-/// Group indices by (`file_idx`, `row_group_idx`) and sort them within each group for efficient row selection.
+/// Group indices by (`file_idx`, `row_group_idx`).
+///
+/// Indices within each batch are already sorted and duplicate-free (both feeders emit
+/// sequential ranges per row group), so no sorting or deduplication is needed here.
 fn group_indices(
     dataset: &Dataset,
     global_indices: &[usize],
 ) -> HashMap<(usize, usize), Vec<usize>> {
-    let mut groups: HashMap<(usize, usize), BinaryHeap<usize>> = HashMap::new();
+    let mut groups: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
     for &global_idx in global_indices {
         let (meta, local) = dataset.locate_row(global_idx);
         groups
@@ -21,17 +24,7 @@ fn group_indices(
             .or_default()
             .push(local);
     }
-    // Convert BinaryHeaps to sorted and deduplicated Vecs
     groups
-        .into_iter()
-        .map(|(key, local_rows)| {
-            (key, {
-                let mut local_rows = local_rows.into_sorted_vec();
-                local_rows.dedup();
-                local_rows
-            })
-        })
-        .collect()
 }
 
 /// Build a `RowSelection` that selects `sorted_local_indices` (must be sorted and deduplicated) from a row group.
@@ -50,13 +43,10 @@ fn make_row_selection(sorted_local_indices: &[usize]) -> RowSelection {
     RowSelection::from(selectors)
 }
 
-/// Read a batch of rows from `dataset` identified by `global_indices`
+/// Read a batch of rows from `dataset` identified by `global_indices`.
 ///
-/// Rows are grouped by `(file_idx, row_group_idx)` to minimize seeks
-/// The output batch may contain rows in a different order than `global_indices` (sorted by file then row group)
-///
-/// Duplicate indices within the same row group are deduplicated (`RowSelection` selects each row exactly once)
-/// This means that if `global_indices` contains duplicates, the resulting batch may be smaller than expected
+/// Rows are grouped by `(file_idx, row_group_idx)` to minimise seeks. The output batch
+/// rows are ordered by file then row group, not by the original index order.
 pub fn read_batch(dataset: &Dataset, global_indices: &[usize]) -> Result<RecordBatch> {
     let groups = group_indices(dataset, global_indices);
     let mut batches = Vec::with_capacity(groups.len());

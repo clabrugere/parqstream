@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread;
 
 use arrow::record_batch::RecordBatch;
-use crossbeam_channel::{bounded, Receiver};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
 use rand::prelude::*;
@@ -11,6 +11,71 @@ use crate::batch::Batch;
 use crate::dataset::Dataset;
 use crate::error::{Error, Result};
 use crate::reader::read_batch;
+
+/// Rows are yielded in file order, wrapping at `total_rows`
+fn sequential_feeder(
+    index_tx: Sender<Vec<usize>>,
+    total_rows: usize,
+    batch_size: usize,
+    num_steps: usize,
+) {
+    for step in 0..num_steps {
+        let indices = (0..batch_size)
+            .map(|i| (step * batch_size + i) % total_rows)
+            .collect();
+        if index_tx.send(indices).is_err() {
+            break;
+        }
+    }
+}
+
+/// Row groups are shuffled at the start of each epoch and rows are yielded sequentially
+/// within each row group. Each batch touches at most 2 row groups
+fn shuffle_feeder(
+    index_tx: Sender<Vec<usize>>,
+    row_groups: Vec<(usize, usize)>,
+    batch_size: usize,
+    num_steps: usize,
+) {
+    let mut rng = rand::rng();
+    let num_row_groups = row_groups.len();
+
+    let mut epoch_order = (0..num_row_groups).collect::<Vec<_>>();
+    epoch_order.shuffle(&mut rng);
+    let mut row_group_cursor = 0;
+    let mut within_cursor = 0;
+
+    for _ in 0..num_steps {
+        let mut indices = Vec::with_capacity(batch_size);
+
+        while indices.len() < batch_size {
+            if row_group_cursor >= num_row_groups {
+                // Start of new epoch: re-shuffle row group order
+                epoch_order.shuffle(&mut rng);
+                row_group_cursor = 0;
+                within_cursor = 0;
+            }
+
+            let row_group_idx = epoch_order[row_group_cursor];
+            let (row_offset, num_rows) = row_groups[row_group_idx];
+            let available = num_rows - within_cursor;
+            let need = batch_size - indices.len();
+            let take = need.min(available);
+
+            indices.extend((within_cursor..within_cursor + take).map(|i| row_offset + i));
+            within_cursor += take;
+
+            if within_cursor >= num_rows {
+                row_group_cursor += 1;
+                within_cursor = 0;
+            }
+        }
+
+        if index_tx.send(indices).is_err() {
+            break;
+        }
+    }
+}
 
 /// Dataloader with prefetching.
 ///
@@ -47,22 +112,19 @@ impl DataLoader {
         // Batch channel: workers -> Python
         let (batch_tx, batch_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
-        // Generates batches indices and send them to workers
+        // Pre-compute row group layout so the feeder closure doesn't need to capture `dataset`
+        let row_groups: Vec<(usize, usize)> = dataset
+            .row_group_index
+            .iter()
+            .map(|m| (m.row_offset, m.num_rows))
+            .collect();
+
+        // Generates batch indices and sends them to workers
         thread::spawn(move || {
-            let mut rng = rand::rng();
-            for step in 0..num_steps {
-                let indices = if shuffle {
-                    (0..batch_size)
-                        .map(|_| rng.random_range(0..total_rows))
-                        .collect()
-                } else {
-                    (0..batch_size)
-                        .map(|i| (step * batch_size + i) % total_rows)
-                        .collect()
-                };
-                if index_tx.send(indices).is_err() {
-                    break; // workers have stopped
-                }
+            if shuffle {
+                shuffle_feeder(index_tx, row_groups, batch_size, num_steps);
+            } else {
+                sequential_feeder(index_tx, total_rows, batch_size, num_steps);
             }
             // Dropping index_tx signals workers to exit
         });

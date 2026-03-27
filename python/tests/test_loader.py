@@ -28,9 +28,7 @@ def test_batch_size(parquet_path):
     loader = DataLoader(ds, batch_size=512, num_steps=3)
 
     for batch in loader:
-        # Each batch should have at most batch_size rows but potentially fewer it it had duplicate rows after sampling
-        assert len(batch["f1"]) <= 512
-        assert len(batch["f1"]) > 0
+        assert len(batch["f1"]) == 512
 
 
 def test_all_columns_default(parquet_path):
@@ -139,4 +137,4 @@ def test_shuffle_ids_in_bounds(parquet_path):
     all_ids = np.concatenate([batch["id"] for batch in loader])
     assert all_ids.min() >= 0
     assert all_ids.max() < 10_000
-    assert len(all_ids) <= 10_000  # duplicates can exist because of random sampling with replacement
+    assert len(all_ids) == 10_000
