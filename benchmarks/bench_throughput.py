@@ -3,6 +3,7 @@ import glob
 import logging
 import os
 import sys
+from datetime import datetime
 
 import parqstream
 from utils import Benchmark, measure_throughput, print_result, save_result
@@ -65,7 +66,11 @@ def run_sweep(
         print_result(label, benchmark.results, logger)
         results.append(benchmark)
 
-    save_result({"bench": "throughput", "results": [r.to_dict() for r in results]}, results_dir, "bench_throughput")
+    save_result(
+        {"bench": "throughput", "results": [r.to_dict() for r in results]},
+        results_dir,
+        f"bench_throughput_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+    )
 
     return results
 
