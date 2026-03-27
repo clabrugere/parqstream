@@ -15,7 +15,7 @@ def _col_to_numpy(col: Column) -> np.ndarray:
 
 
 class DataLoader:
-    """Prefetching dataloader that yields batches as ``dict[str, np.ndarray]``.
+    """Prefetching dataloader that yields batches as `dict[str, np.ndarray]`.
 
     Backed by Rust workers that read and assemble Arrow batches off the GIL.
     Columns are transferred via the Arrow PyCapsule Interface — zero-copy for

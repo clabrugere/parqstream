@@ -55,11 +55,11 @@ parquet_files = [...]
 ds = Dataset(parquet_files, columns=["a", "b"]) # optionally select subset of columns
 loader = DataLoader(
     ds, 
-    batch_size=256, 
-    num_steps=4, 
-    shuffle=True,
+    batch_size=256,
+    num_steps=4, # will generate 4 batches
+    shuffle=True, # uniform random sampling with replacement
     num_workers=4,
-    prefetch_factor =4,
+    prefetch_factor =2,
 )
 
 for batch in loader:
