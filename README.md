@@ -52,12 +52,11 @@ numpy's ndarrays without copy when possible.
 
 ```python
 parquet_files = [...]
-ds = Dataset(parquet_files)
+ds = Dataset(parquet_files, columns=["a", "b"]) # optionally select subset of columns
 loader = DataLoader(
     ds, 
     batch_size=256, 
     num_steps=4, 
-    columns=["a", "b"]
     shuffle=True,
     num_workers=4,
     prefetch_factor =4,
