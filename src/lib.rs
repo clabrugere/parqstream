@@ -3,6 +3,7 @@ mod buffer;
 mod dataloader;
 mod dataset;
 mod error;
+mod pipeline;
 
 use pyo3::prelude::*;
 
