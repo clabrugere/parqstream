@@ -27,7 +27,6 @@ class DataLoader:
         dataset: Dataset,
         batch_size: int,
         num_steps: int,
-        columns: list[str] | None = None,
         shuffle: bool = False,
         num_workers: int = 4,
         prefetch_factor: int = 4,
@@ -36,7 +35,6 @@ class DataLoader:
             dataset._dataset,
             batch_size,
             num_steps,
-            columns,
             shuffle,
             num_workers,
             prefetch_factor,
@@ -57,8 +55,8 @@ class DataLoader:
 class Dataset:
     """Dataset representing distributed over one or more Parquet files only read as needed."""
 
-    def __init__(self, paths: list[str]) -> None:
-        self._dataset = _RustDataset(paths)
+    def __init__(self, paths: list[str], columns: list[str] | None = None) -> None:
+        self._dataset = _RustDataset(paths, columns)
 
     @property
     def columns(self) -> list[str]:

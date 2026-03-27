@@ -47,7 +47,7 @@ impl DataLoader {
         // Batch channel: workers -> Python
         let (batch_tx, batch_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
-        // Generates index batches and feeds them to workers
+        // Generates batches indices and send them to workers
         thread::spawn(move || {
             let mut rng = rand::rng();
             for step in 0..num_steps {

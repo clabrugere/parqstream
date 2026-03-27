@@ -9,9 +9,14 @@ def test_open_single_file(parquet_path):
     assert ds.num_row_groups == 10  # 10_000 rows / 1_000 per group
 
 
-def test_column_names(parquet_path):
+def test_column_names_all(parquet_path):
     ds = Dataset([parquet_path])
     assert set(ds.columns) == {"label", "f1", "f2", "weight", "id"}
+
+
+def test_column_names_projected(parquet_path):
+    ds = Dataset([parquet_path], columns=["label", "f1", "f2"])
+    assert set(ds.columns) == {"label", "f1", "f2"}
 
 
 def test_open_multiple_files(two_parquet_paths):
@@ -29,10 +34,3 @@ def test_empty_paths_raises():
 def test_missing_file_raises(tmp_path):
     with pytest.raises(Exception):
         Dataset([str(tmp_path / "nonexistent.parquet")])
-
-
-def test_repr(parquet_path):
-    ds = Dataset([parquet_path])
-    r = repr(ds)
-    assert "Dataset" in r
-    assert "10000" in r

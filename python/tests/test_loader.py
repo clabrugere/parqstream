@@ -5,12 +5,11 @@ from parqstream import DataLoader, Dataset
 
 
 def test_basic_iteration(parquet_path):
-    ds = Dataset([parquet_path])
+    ds = Dataset([parquet_path], columns=["f1", "label"])
     loader = DataLoader(
         ds,
         batch_size=256,
         num_steps=4,
-        columns=["f1", "label"],
         num_workers=2,
         prefetch_factor=2,
     )
@@ -25,8 +24,8 @@ def test_basic_iteration(parquet_path):
 
 
 def test_batch_size(parquet_path):
-    ds = Dataset([parquet_path])
-    loader = DataLoader(ds, batch_size=512, num_steps=3, columns=["f1"])
+    ds = Dataset([parquet_path], columns=["f1"])
+    loader = DataLoader(ds, batch_size=512, num_steps=3)
 
     for batch in loader:
         # Each batch should have at most batch_size rows but potentially fewer it it had duplicate rows after sampling
@@ -44,14 +43,14 @@ def test_all_columns_default(parquet_path):
 
 def test_multi_file(two_parquet_paths):
     ds = Dataset(two_parquet_paths)
-    loader = DataLoader(ds, batch_size=256, num_steps=4, columns=["f1", "label"])
+    loader = DataLoader(ds, batch_size=256, num_steps=4)
 
     assert sum(1 for _ in loader) == 4
 
 
 def test_multiple_iterations(parquet_path):
     ds = Dataset([parquet_path])
-    loader = DataLoader(ds, batch_size=256, num_steps=4, columns=["f1"])
+    loader = DataLoader(ds, batch_size=256, num_steps=4)
 
     assert sum(1 for _ in loader) == 4
     assert sum(1 for _ in loader) == 4
@@ -63,7 +62,6 @@ def test_large_prefetch(parquet_path):
         ds,
         batch_size=1024,
         num_steps=9,
-        columns=["f1", "f2", "label"],
         num_workers=4,
         prefetch_factor=8,
     )
@@ -71,8 +69,8 @@ def test_large_prefetch(parquet_path):
 
 
 def test_torch_tensor(parquet_path):
-    ds = Dataset([parquet_path])
-    loader = DataLoader(ds, batch_size=256, num_steps=4, columns=["f1", "label"])
+    ds = Dataset([parquet_path], columns=["f1", "label"])
+    loader = DataLoader(ds, batch_size=256, num_steps=4)
 
     for batch in loader:
         x = torch.from_numpy(batch["f1"].copy())
@@ -83,8 +81,8 @@ def test_torch_tensor(parquet_path):
 
 
 def test_torch_from_numpy_zero_copy(parquet_path):
-    ds = Dataset([parquet_path])
-    loader = DataLoader(ds, batch_size=256, num_steps=1, columns=["f1"])
+    ds = Dataset([parquet_path], columns=["f1"])
+    loader = DataLoader(ds, batch_size=256, num_steps=1)
 
     for batch in loader:
         with pytest.warns(UserWarning, match="The given NumPy array is not writable") as record:
@@ -94,7 +92,7 @@ def test_torch_from_numpy_zero_copy(parquet_path):
 
 
 def test_sequential_order(parquet_path):
-    ds = Dataset([parquet_path])
+    ds = Dataset([parquet_path], columns=["id"])
     batch_size = 1_000
     num_steps = 10
 
@@ -102,7 +100,6 @@ def test_sequential_order(parquet_path):
         ds,
         batch_size=batch_size,
         num_steps=num_steps,
-        columns=["id"],
         shuffle=False,
         num_workers=1,
     )
@@ -112,7 +109,7 @@ def test_sequential_order(parquet_path):
 
 
 def test_sequential_wraps_around(parquet_path):
-    ds = Dataset([parquet_path])
+    ds = Dataset([parquet_path], columns=["id"])
     batch_size = 1_000
     num_steps = 15
 
@@ -120,7 +117,6 @@ def test_sequential_wraps_around(parquet_path):
         ds,
         batch_size=batch_size,
         num_steps=num_steps,
-        columns=["id"],
         shuffle=False,
         num_workers=1,
     )
@@ -131,13 +127,12 @@ def test_sequential_wraps_around(parquet_path):
 
 
 def test_shuffle_ids_in_bounds(parquet_path):
-    ds = Dataset([parquet_path])
+    ds = Dataset([parquet_path], columns=["id"])
 
     loader = DataLoader(
         ds,
         batch_size=1_000,
         num_steps=10,
-        columns=["id"],
         shuffle=True,
     )
 
