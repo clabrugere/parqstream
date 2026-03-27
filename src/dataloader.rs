@@ -25,7 +25,6 @@ pub struct DataLoader {
     dataset: Arc<Dataset>,
     batch_size: usize,
     num_steps: usize,
-    columns: Vec<String>,
     shuffle: bool,
     num_workers: usize,
     prefetch_factor: usize,
@@ -39,7 +38,6 @@ impl DataLoader {
         let dataset = self.dataset.clone();
         let batch_size = self.batch_size;
         let num_steps = self.num_steps;
-        let columns = self.columns.clone();
         let shuffle = self.shuffle;
         let num_workers = self.num_workers;
         let total_rows = self.dataset.total_rows;
@@ -74,11 +72,10 @@ impl DataLoader {
             let index_rx = index_rx.clone();
             let batch_tx = batch_tx.clone();
             let dataset = dataset.clone();
-            let columns = columns.clone();
 
             thread::spawn(move || {
                 for indices in &index_rx {
-                    match read_batch(&dataset, &indices, &columns) {
+                    match read_batch(&dataset, &indices) {
                         Ok(batch) => {
                             if batch_tx.send(Ok(batch)).is_err() {
                                 break; // consumer dropped
@@ -107,7 +104,6 @@ impl DataLoader {
         dataset,
         batch_size,
         num_steps,
-        columns = None,
         shuffle = false,
         num_workers = 4,
         prefetch_factor = 4,
@@ -116,7 +112,6 @@ impl DataLoader {
         dataset: &Dataset,
         batch_size: usize,
         num_steps: usize,
-        columns: Option<Vec<String>>,
         shuffle: bool,
         num_workers: usize,
         prefetch_factor: usize,
@@ -139,14 +134,10 @@ impl DataLoader {
             .get();
         let num_workers = num_workers.min(count).max(1);
 
-        let columns = columns.unwrap_or_else(|| dataset.columns.clone());
-        dataset.validate_columns(&columns)?;
-
         Ok(Self {
             dataset: Arc::new(dataset.clone()),
             batch_size,
             num_steps,
-            columns,
             num_workers,
             prefetch_factor,
             shuffle,
@@ -190,11 +181,11 @@ impl DataLoader {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "DataLoader(rows={}, batch_size={}, num_steps={}, columns={:?}, num_workers={}, prefetch_factor={})",
+            "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={}, num_workers={}, prefetch_factor={})",
             self.dataset.total_rows,
+            self.dataset.columns,
             self.batch_size,
             self.num_steps,
-            self.columns,
             self.num_workers,
             self.prefetch_factor,
         )

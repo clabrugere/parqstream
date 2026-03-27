@@ -1,11 +1,41 @@
-use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::{fs::File, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::ArrowReaderOptions;
+use parquet::arrow::{arrow_reader::ArrowReaderMetadata, ProjectionMask};
 use pyo3::prelude::*;
 
 use crate::error::{Error, Result};
+
+/// Resolve `columns` to their indices in the schema, sorted by schema order, returning an error if any is missing.
+pub fn column_indices(schema: &SchemaRef, columns: &[String]) -> Result<Vec<usize>> {
+    let mut indices = columns
+        .iter()
+        .map(|name| {
+            schema
+                .index_of(name)
+                .map_err(|_| Error::ColumnNotFound { name: name.clone() })
+        })
+        .collect::<Result<Vec<usize>>>()?;
+    indices.sort_unstable();
+    Ok(indices)
+}
+
+pub fn load_arrow_meta(path: impl AsRef<Path>) -> Result<ArrowReaderMetadata> {
+    let file = File::open(&path).map_err(|e| Error::OpenFile {
+        path: path.as_ref().to_path_buf(),
+        source: e,
+    })?;
+    let arrow_meta =
+        ArrowReaderMetadata::load(&file, ArrowReaderOptions::default()).map_err(|e| {
+            Error::ReadParquet {
+                path: path.as_ref().to_path_buf(),
+                source: e,
+            }
+        })?;
+    Ok(arrow_meta)
+}
 
 /// Metadata for a single Parquet row group, with its position in the global index.
 #[derive(Debug, Clone)]
@@ -16,79 +46,93 @@ pub struct RowGroupMeta {
     pub num_rows: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct ParquetFile {
+    pub path: PathBuf,
+    pub arrow_meta: ArrowReaderMetadata,
+}
+
 /// Reads only footer metadata at construction time, no data is loaded until `read_batch` is called.
 /// `RowGroupIndex` flattens the parquet files to allow for random row access in the whole dataset
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct Dataset {
-    pub files: Vec<PathBuf>,
-    pub schema: SchemaRef,
+    pub files: Vec<ParquetFile>,
+    pub columns: Vec<String>,
+    pub projected_schema: SchemaRef,
+    pub projection: ProjectionMask,
     pub row_group_index: Vec<RowGroupMeta>,
     pub total_rows: usize,
-    pub columns: Vec<String>,
 }
 
 impl Dataset {
     /// Construct a single logical dataset from `paths`, while validating that all files share the same schema.
-    pub fn from_files(paths: Vec<String>) -> Result<Self> {
-        if paths.is_empty() {
-            return Err(Error::EmptyPaths);
-        }
-
+    pub fn new(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
+        let mut paths = paths.into_iter().enumerate();
         let mut files = Vec::with_capacity(paths.len());
         let mut row_group_index = Vec::new();
         let mut total_rows = 0;
-        let mut schema = None;
 
-        for (file_idx, path) in paths.into_iter().enumerate() {
-            let file = File::open(&path).map_err(|e| Error::OpenFile {
-                path: path.as_str().into(),
-                source: e,
-            })?;
-            let builder =
-                ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| Error::ReadParquet {
-                    path: path.as_str().into(),
-                    source: e,
-                })?;
+        // Read first file metadata to determine schema
+        let (file_idx, first_path) = paths.next().ok_or(Error::EmptyPaths)?;
+        let arrow_meta = load_arrow_meta(&first_path)?;
 
-            // Validate schema consistency across files.
-            let file_schema = builder.schema().clone();
-            match &schema {
-                None => schema = Some(file_schema),
-                Some(s) => {
-                    if s.fields() != file_schema.fields() {
-                        return Err(Error::SchemaMismatch {
-                            path: path.as_str().into(),
-                        });
-                    }
-                }
+        let schema = arrow_meta.schema().clone();
+        let columns =
+            columns.unwrap_or_else(|| schema.fields().iter().map(|f| f.name().clone()).collect());
+        let col_indices = column_indices(&schema, &columns)?;
+        let projected_schema = Arc::new(schema.project(&col_indices)?);
+        let projection = ProjectionMask::roots(arrow_meta.parquet_schema(), col_indices);
+
+        for row_group_idx in 0..arrow_meta.metadata().num_row_groups() {
+            let num_rows =
+                usize::try_from(arrow_meta.metadata().row_group(row_group_idx).num_rows())?;
+            row_group_index.push(RowGroupMeta {
+                file_idx,
+                row_group_idx,
+                row_offset: total_rows,
+                num_rows,
+            });
+            total_rows += num_rows;
+        }
+
+        files.push(ParquetFile {
+            path: first_path.into(),
+            arrow_meta: arrow_meta.clone(),
+        });
+
+        // Process remaining files, validating schema consistency and indexing row groups
+        for (file_idx, path) in paths {
+            let arrow_meta = load_arrow_meta(&path)?;
+            if arrow_meta.schema().fields() != projected_schema.fields() {
+                return Err(Error::SchemaMismatch { path: path.into() });
             }
 
-            // Index all row groups.
-            let metadata = builder.metadata();
-            for rg_idx in 0..metadata.num_row_groups() {
-                let num_rows = usize::try_from(metadata.row_group(rg_idx).num_rows())?;
+            for row_group_idx in 0..arrow_meta.metadata().num_row_groups() {
+                let num_rows =
+                    usize::try_from(arrow_meta.metadata().row_group(row_group_idx).num_rows())?;
                 row_group_index.push(RowGroupMeta {
                     file_idx,
-                    row_group_idx: rg_idx,
+                    row_group_idx,
                     row_offset: total_rows,
                     num_rows,
                 });
                 total_rows += num_rows;
             }
 
-            files.push(path.into());
+            files.push(ParquetFile {
+                path: path.into(),
+                arrow_meta: arrow_meta.clone(),
+            });
         }
-
-        let schema = schema.unwrap(); // guaranteed by non-empty paths check
-        let columns = schema.fields().iter().map(|f| f.name().clone()).collect();
 
         Ok(Self {
             files,
-            schema,
+            columns,
+            projected_schema,
+            projection,
             row_group_index,
             total_rows,
-            columns,
         })
     }
 
@@ -103,37 +147,17 @@ impl Dataset {
         let local = global_row - meta.row_offset;
         (meta, local)
     }
-
-    // Validate that all column names exist in the schema, returning an error if any is missing.
-    pub fn validate_columns(&self, columns: &[String]) -> Result<()> {
-        for name in columns {
-            self.schema
-                .index_of(name)
-                .map_err(|_| Error::ColumnNotFound { name: name.clone() })?;
-        }
-        Ok(())
-    }
-
-    /// Resolve `columns` to their indices in the schema, sorted by schema order, returning an error if any is missing.
-    pub fn column_indices(&self, columns: &[String]) -> Result<Vec<usize>> {
-        let mut indices = columns
-            .iter()
-            .map(|name| {
-                self.schema
-                    .index_of(name)
-                    .map_err(|_| Error::ColumnNotFound { name: name.clone() })
-            })
-            .collect::<Result<Vec<usize>>>()?;
-        indices.sort_unstable();
-        Ok(indices)
-    }
 }
 
 #[pymethods]
 impl Dataset {
     #[new]
-    pub fn py_new(paths: Vec<String>) -> PyResult<Self> {
-        Ok(Self::from_files(paths)?)
+    #[pyo3(signature = (
+        paths,
+        columns = None,
+    ))]
+    pub fn py_new(paths: Vec<String>, columns: Option<Vec<String>>) -> PyResult<Self> {
+        Ok(Self::new(paths, columns)?)
     }
 
     #[getter]
@@ -156,9 +180,10 @@ impl Dataset {
     }
 
     pub fn __repr__(&self) -> String {
+        let paths: Vec<_> = self.files.iter().map(|f| &f.path).collect();
         format!(
             "Dataset(files={:?}, rows={}, columns={:?})",
-            self.files, self.total_rows, self.columns,
+            paths, self.total_rows, self.columns,
         )
     }
 }

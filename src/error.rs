@@ -30,10 +30,10 @@ pub enum Error {
         source: ParquetError,
     },
 
-    #[error("cannot build reader for row group {rg} in {path}")]
+    #[error("cannot build reader for row group {row_group_idx} in {path}")]
     BuildReader {
         path: PathBuf,
-        rg: usize,
+        row_group_idx: usize,
         #[source]
         source: ParquetError,
     },
