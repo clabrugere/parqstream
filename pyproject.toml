@@ -11,6 +11,7 @@ dependencies = ["numpy", "pyarrow"]
 
 [project.optional-dependencies]
 dev = ["maturin", "pytest", "torch"]
+bench = ["torch", "psutil", "matplotlib", "pynvml"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }

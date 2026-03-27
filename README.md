@@ -57,6 +57,7 @@ loader = DataLoader(
     shuffle=True, # uniform random sampling with replacement
     num_workers=4,
     prefetch_factor =2,
+    buffer_size=100_000 # number of rows loaded in memory
 )
 
 for batch in loader:
