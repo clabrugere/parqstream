@@ -1,9 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::result::Result as StdResult;
 use std::{fs::File, sync::Arc};
 
+use arrow::array::RecordBatch;
+use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
-use parquet::arrow::arrow_reader::ArrowReaderOptions;
-use parquet::arrow::{arrow_reader::ArrowReaderMetadata, ProjectionMask};
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
+    RowSelector,
+};
+use parquet::arrow::ProjectionMask;
 use pyo3::prelude::*;
 
 use crate::error::{Error, Result};
@@ -136,16 +142,42 @@ impl Dataset {
         })
     }
 
-    /// Find the `RowGroupMeta` that contains `global_row` and return it along with the local row index within that group
-    pub fn locate_row(&self, global_row: usize) -> (&RowGroupMeta, usize) {
-        // Binary search on row_offset.
-        let idx = self
-            .row_group_index
-            .partition_point(|m| m.row_offset <= global_row)
-            .saturating_sub(1);
-        let meta = &self.row_group_index[idx];
-        let local = global_row - meta.row_offset;
-        (meta, local)
+    pub fn read_row_group_range(
+        &self,
+        file_idx: usize,
+        row_group_idx: usize,
+        start: usize,
+        len: usize,
+    ) -> Result<RecordBatch> {
+        let parquet_file = &self.files[file_idx];
+        let file = File::open(parquet_file.path.clone()).map_err(|e| Error::OpenFile {
+            path: parquet_file.path.clone(),
+            source: e,
+        })?;
+
+        // skip first `start`rows and read `len` following rows
+        let mut selectors = Vec::with_capacity(2);
+        if start > 0 {
+            selectors.push(RowSelector::skip(start));
+        }
+        selectors.push(RowSelector::select(len));
+
+        let parts = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            file,
+            parquet_file.arrow_meta.clone(),
+        )
+        .with_row_groups(vec![row_group_idx])
+        .with_projection(self.projection.clone())
+        .with_row_selection(RowSelection::from(selectors))
+        .build()
+        .map_err(|e| Error::BuildReader {
+            path: parquet_file.path.clone(),
+            row_group_idx,
+            source: e,
+        })?
+        .collect::<StdResult<Vec<_>, _>>()?;
+
+        Ok(concat_batches(&self.projected_schema, &parts)?)
     }
 }
 

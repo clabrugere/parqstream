@@ -6,13 +6,7 @@ from parqstream import DataLoader, Dataset
 
 def test_basic_iteration(parquet_path):
     ds = Dataset([parquet_path], columns=["f1", "label"])
-    loader = DataLoader(
-        ds,
-        batch_size=256,
-        num_steps=4,
-        num_workers=2,
-        prefetch_factor=2,
-    )
+    loader = DataLoader(ds, batch_size=256, num_steps=4, num_workers=2)
 
     assert sum(1 for _ in loader) == 4
 
@@ -133,6 +127,16 @@ def test_shuffle_ids_in_bounds(parquet_path):
         num_steps=10,
         shuffle=True,
     )
+
+    all_ids = np.concatenate([batch["id"] for batch in loader])
+    assert all_ids.min() >= 0
+    assert all_ids.max() < 10_000
+    assert len(all_ids) == 10_000
+
+
+def test_buffer_explicit_size(parquet_path):
+    ds = Dataset([parquet_path], columns=["id"])
+    loader = DataLoader(ds, batch_size=500, num_steps=20, shuffle=True, buffer_size=2_000)
 
     all_ids = np.concatenate([batch["id"] for batch in loader])
     assert all_ids.min() >= 0

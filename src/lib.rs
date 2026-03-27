@@ -1,8 +1,8 @@
 mod batch;
+mod buffer;
 mod dataloader;
 mod dataset;
 mod error;
-mod reader;
 
 use pyo3::prelude::*;
 

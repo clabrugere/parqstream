@@ -28,8 +28,9 @@ class DataLoader:
         batch_size: int,
         num_steps: int,
         shuffle: bool = False,
-        num_workers: int = 4,
-        prefetch_factor: int = 4,
+        num_workers: int = 1,
+        prefetch_factor: int = 1,
+        buffer_size: int | None = None,
     ) -> None:
         self._dataloader = _RustDataLoader(
             dataset._dataset,
@@ -38,6 +39,7 @@ class DataLoader:
             shuffle,
             num_workers,
             prefetch_factor,
+            buffer_size,
         )
 
     def __iter__(self) -> DataLoader:

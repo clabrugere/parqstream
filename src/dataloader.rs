@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::thread;
 
+use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyValueError};
@@ -8,80 +9,64 @@ use pyo3::prelude::*;
 use rand::prelude::*;
 
 use crate::batch::Batch;
+use crate::buffer::Buffer;
 use crate::dataset::Dataset;
 use crate::error::{Error, Result};
-use crate::reader::read_batch;
 
-/// Rows are yielded in file order, wrapping at `total_rows`
-fn sequential_feeder(
-    index_tx: Sender<Vec<usize>>,
-    total_rows: usize,
-    batch_size: usize,
-    num_steps: usize,
-) {
-    for step in 0..num_steps {
-        let indices = (0..batch_size)
-            .map(|i| (step * batch_size + i) % total_rows)
-            .collect();
-        if index_tx.send(indices).is_err() {
-            break;
-        }
-    }
-}
-
-/// Row groups are shuffled at the start of each epoch and rows are yielded sequentially
-/// within each row group. Each batch touches at most 2 row groups
-fn shuffle_feeder(
-    index_tx: Sender<Vec<usize>>,
-    row_groups: Vec<(usize, usize)>,
-    batch_size: usize,
-    num_steps: usize,
+// thread that continuously sends row group read tasks to the chunk channel, shuffled if needed
+fn chunk_feeder(
+    chunk_tx: &Sender<(usize, usize, usize)>,
+    row_groups: &[(usize, usize)],
+    chunk_size: usize,
+    shuffle: bool,
 ) {
     let mut rng = rand::rng();
-    let num_row_groups = row_groups.len();
+    let num_groups = row_groups.len();
 
-    let mut epoch_order = (0..num_row_groups).collect::<Vec<_>>();
-    epoch_order.shuffle(&mut rng);
-    let mut row_group_cursor = 0;
-    let mut within_cursor = 0;
+    let mut order = (0..num_groups).collect::<Vec<_>>();
+    if shuffle {
+        order.shuffle(&mut rng);
+    }
 
-    for _ in 0..num_steps {
-        let mut indices = Vec::with_capacity(batch_size);
+    let mut row_group_offset = 0;
+    let mut intra_row_group_offset = 0;
 
-        while indices.len() < batch_size {
-            if row_group_cursor >= num_row_groups {
-                // Start of new epoch: re-shuffle row group order
-                epoch_order.shuffle(&mut rng);
-                row_group_cursor = 0;
-                within_cursor = 0;
+    loop {
+        // new epoch , re-shuffle if needed
+        if row_group_offset >= num_groups {
+            if shuffle {
+                order.shuffle(&mut rng);
             }
-
-            let row_group_idx = epoch_order[row_group_cursor];
-            let (row_offset, num_rows) = row_groups[row_group_idx];
-            let available = num_rows - within_cursor;
-            let need = batch_size - indices.len();
-            let take = need.min(available);
-
-            indices.extend((within_cursor..within_cursor + take).map(|i| row_offset + i));
-            within_cursor += take;
-
-            if within_cursor >= num_rows {
-                row_group_cursor += 1;
-                within_cursor = 0;
-            }
+            row_group_offset = 0;
+            intra_row_group_offset = 0;
         }
+        let row_group_idx = order[row_group_offset];
+        let (_, num_rows) = row_groups[row_group_idx];
+        let len = chunk_size.min(num_rows - intra_row_group_offset);
 
-        if index_tx.send(indices).is_err() {
-            break;
+        if chunk_tx
+            .send((row_group_idx, intra_row_group_offset, len))
+            .is_err()
+        {
+            break; // consumer dropped
+        }
+        intra_row_group_offset += len;
+        if intra_row_group_offset >= num_rows {
+            row_group_offset += 1;
+            intra_row_group_offset = 0;
         }
     }
 }
 
 /// Dataloader with prefetching.
 ///
-/// Calling `__iter__` (or iterating with a for loop) starts a pipeline of background threads that
-/// prefetch `prefetch_factor` batches (sampled uniformly with replacement) ahead of the Python consumer.
-/// The GIL is released while waiting for the next batch.
+/// Calling `__iter__` (or iterating with a for loop) starts:
+/// 1. a thread that emit chunks of rows groups to a chunk channel (feeder)
+/// 2. `num_workers` threads that read chunks from the chunk channel, load them from disk and send to a data channel (workers)
+/// 3. a thread that collects chunks from the data channel until it has > `buffer_size` rows, concatenates them and sends to a batch channel (collector)
+///
+/// The main thread consumes batches from the batch channel, yielding them to Python. Up to `prefetch_factor` batches can be buffered in the batch channel,
+/// and the GIL is released while waiting for batches to allow the background threads to run.
 ///
 /// The iterator runs for exactly `num_steps` batches, then raises `StopIteration`.
 /// Dropping or garbage-collecting the `DataLoader` signals the background threads to stop early.
@@ -93,69 +78,97 @@ pub struct DataLoader {
     shuffle: bool,
     num_workers: usize,
     prefetch_factor: usize,
-    // Set when iteration starts, cleared on exhaustion
-    batch_rx: Option<Receiver<Result<RecordBatch>>>,
+    buffer_size: Option<usize>,
+    // iteration state
+    buffer: Option<Buffer>,
+    steps_remaining: usize,
 }
 
 impl DataLoader {
     /// Spawn the feeder and worker threads and return the batch receiver
     fn spawn_pipeline(&self) -> Receiver<Result<RecordBatch>> {
         let dataset = self.dataset.clone();
-        let batch_size = self.batch_size;
-        let num_steps = self.num_steps;
+        let buffer_size = self
+            .buffer_size
+            .unwrap_or(dataset.total_rows)
+            .max(self.batch_size);
+        let chunk_size = (buffer_size + self.num_workers - 1).div_ceil(self.num_workers);
         let shuffle = self.shuffle;
-        let num_workers = self.num_workers;
-        let total_rows = self.dataset.total_rows;
 
-        // Index channel: feeder -> workers
-        let (index_tx, index_rx) = bounded::<Vec<usize>>(num_workers * 2);
-        // Batch channel: workers -> Python
-        let (batch_tx, batch_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
-
-        // Pre-compute row group layout so the feeder closure doesn't need to capture `dataset`
+        // Pre-compute row group layout for feeder (avoids capturing dataset Arc)
         let row_groups: Vec<(usize, usize)> = dataset
             .row_group_index
             .iter()
             .map(|m| (m.row_offset, m.num_rows))
             .collect();
 
-        // Generates batch indices and sends them to workers
-        thread::spawn(move || {
-            if shuffle {
-                shuffle_feeder(index_tx, row_groups, batch_size, num_steps);
-            } else {
-                sequential_feeder(index_tx, total_rows, batch_size, num_steps);
-            }
-            // Dropping index_tx signals workers to exit
-        });
+        let (chunk_tx, chunk_rx) = bounded::<(usize, usize, usize)>(self.num_workers * 2);
+        let (data_tx, data_rx) = bounded::<Result<RecordBatch>>(self.num_workers + 2);
+        let (buffer_tx, buffer_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
-        // Each worker pulls an index batch from the channel, reads from disk, and pushes the result batch
-        for _ in 0..num_workers {
-            let index_rx = index_rx.clone();
-            let batch_tx = batch_tx.clone();
+        // chunk feeder sending row group read tasks to workers
+        thread::spawn(move || chunk_feeder(&chunk_tx, &row_groups, chunk_size, shuffle));
+
+        // workers read a contiguous chunk from a row group
+        for _ in 0..self.num_workers {
+            let chunk_rx = chunk_rx.clone();
+            let data_tx = data_tx.clone();
             let dataset = dataset.clone();
-
             thread::spawn(move || {
-                for indices in &index_rx {
-                    match read_batch(&dataset, &indices) {
-                        Ok(batch) => {
-                            if batch_tx.send(Ok(batch)).is_err() {
-                                break; // consumer dropped
+                for (rg_meta_idx, start, len) in &chunk_rx {
+                    let meta = &dataset.row_group_index[rg_meta_idx];
+                    match dataset.read_row_group_range(
+                        meta.file_idx,
+                        meta.row_group_idx,
+                        start,
+                        len,
+                    ) {
+                        Ok(b) => {
+                            if data_tx.send(Ok(b)).is_err() {
+                                break;
                             }
                         }
                         Err(e) => {
-                            let _ = batch_tx.send(Err(Error::WorkerThread(e.to_string())));
-                            break; // signal error and exit
+                            let _ = data_tx.send(Err(e));
+                            break;
                         }
                     }
                 }
-                // Dropping batch_tx clone; when all workers drop it the channel closes
             });
         }
-        // Drop the main batch_tx so the channel closes when all workers finish
-        drop(batch_tx);
+        drop(data_tx);
 
-        batch_rx
+        // collect chunks until > buffer_size rows, then concatenate and send to batch buffer
+        let schema = dataset.projected_schema.clone();
+        thread::spawn(move || loop {
+            let mut parts: Vec<RecordBatch> = Vec::new();
+            let mut rows = 0usize;
+            while rows < buffer_size {
+                match data_rx.recv() {
+                    Ok(Ok(chunk)) => {
+                        rows += chunk.num_rows();
+                        parts.push(chunk);
+                    }
+                    Ok(Err(e)) => {
+                        let _ = buffer_tx.send(Err(e));
+                        return;
+                    }
+                    Err(_) => return,
+                }
+            }
+            let buffer = match concat_batches(&schema, &parts) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = buffer_tx.send(Err(e.into()));
+                    return;
+                }
+            };
+            if buffer_tx.send(Ok(buffer)).is_err() {
+                return;
+            }
+        });
+
+        buffer_rx
     }
 }
 
@@ -168,7 +181,8 @@ impl DataLoader {
         num_steps,
         shuffle = false,
         num_workers = 4,
-        prefetch_factor = 4,
+        prefetch_factor = 1,
+        buffer_size = None,
     ))]
     pub fn py_new(
         dataset: &Dataset,
@@ -177,6 +191,7 @@ impl DataLoader {
         shuffle: bool,
         num_workers: usize,
         prefetch_factor: usize,
+        buffer_size: Option<usize>,
     ) -> PyResult<Self> {
         if batch_size == 0 {
             return Err(PyValueError::new_err("batch_size must be > 0"));
@@ -189,6 +204,11 @@ impl DataLoader {
         }
         if prefetch_factor == 0 {
             return Err(PyValueError::new_err("prefetch_factor must be > 0"));
+        }
+        if let Some(buffer_size) = buffer_size {
+            if buffer_size < batch_size {
+                return Err(PyValueError::new_err("buffer_size must be >= batch_size"));
+            }
         }
 
         let count = thread::available_parallelism()
@@ -203,53 +223,48 @@ impl DataLoader {
             num_workers,
             prefetch_factor,
             shuffle,
-            batch_rx: None,
+            buffer_size,
+            buffer: None,
+            steps_remaining: 0,
         })
     }
 
     /// Start (or restart) the prefetch pipeline and return `self`.
     pub fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf.batch_rx = Some(slf.spawn_pipeline());
+        slf.buffer = Some(Buffer::new(slf.spawn_pipeline(), slf.shuffle));
+        slf.steps_remaining = slf.num_steps;
         slf
     }
 
     /// Return the next `Batch`, or raise `StopIteration` when the pipeline is exhausted.
     pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Batch> {
-        let Some(batch_rx) = slf.batch_rx.take() else {
-            return Err(PyStopIteration::new_err("not started"));
+        let batch_size = slf.batch_size;
+        if slf.steps_remaining == 0 {
+            return Err(PyStopIteration::new_err("dataloader consumed"));
+        }
+        let Some(buffer) = slf.buffer.as_mut() else {
+            return Err(PyStopIteration::new_err("dataloader not initialized"));
         };
-
-        // Release the GIL while waiting for the next batch.
-        let result = py.detach(|| batch_rx.recv());
-
-        match result {
-            Ok(Ok(batch)) => {
-                // Put the receiver back for the next iteration.
-                slf.batch_rx = Some(batch_rx);
+        match buffer.take(batch_size, py) {
+            Ok(Some(batch)) => {
+                slf.steps_remaining -= 1;
                 Ok(Batch::new(batch))
             }
-            Ok(Err(e)) => {
-                // Worker thread reported an error
-                slf.batch_rx = None;
-                Err(PyRuntimeError::new_err(format!("worker error: {e}")))
-            }
-            Err(_) => {
-                // Channel closed: iteration complete.
-                slf.batch_rx = None;
-                Err(PyStopIteration::new_err("dataloader consumed"))
-            }
+            Ok(None) => Err(PyStopIteration::new_err("dataloader consumed")),
+            Err(e) => Err(PyRuntimeError::new_err(format!("worker error: {e}"))),
         }
     }
 
     pub fn __repr__(&self) -> String {
         format!(
-            "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={}, num_workers={}, prefetch_factor={})",
+            "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={}, num_workers={}, prefetch_factor={}, buffer_size={:?})",
             self.dataset.total_rows,
             self.dataset.columns,
             self.batch_size,
             self.num_steps,
             self.num_workers,
             self.prefetch_factor,
+            self.buffer_size,
         )
     }
 }
