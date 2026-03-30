@@ -1,87 +1,91 @@
 # parqstream
 
-Stream parquet rows to your machine learning models.
+High-performance tabular dataloader for deep learning, backed by a Rust core.
 
-## Overview
+Streams batches from one or more Parquet files (sharing the same schema) without loading everything into memory. Supports sequential reads and approximate uniform random sampling, with multi-threaded prefetching and zero-copy column transfer via the Arrow PyCapsule Interface.
 
-This small library allows to stream batches from one or multiple parquet files (sharing the same schema) without
-loading everything in memory. It supports sequential read or uniform random sampling as well as parametrizable 
-multi-threaded prefetching and zero-copy when possible.
+## API
 
-The core engine is implemented in rust and a simple API is exposed to the python consumer through two objects:
-* `Dataset` storing paths of parquet files, validating schemas and building a global index using file's metadata for random access.
-* `Dataloader` to iterate over (optionally randomly sampled) batches over some columns, with prefetch and multi-threaded batch 
-construction without locking Python's Global Interpreter. The iteration stops when `num_steps` batches have been returned.
+**`Dataset(paths, columns=None)`** — validates schemas across files and builds a global row-group index from Parquet metadata. No data is loaded at this stage. Optionally restricts to a subset of columns.
 
-## How it works
+**`DataLoader(dataset, batch_size, num_steps, ...)`** — iterator that yields `dict[str, np.ndarray]` batches. Internally spawns:
+1. A feeder thread that emits row-group chunks (optionally shuffled)
+2. `num_workers` worker threads that read chunks from disk off the GIL
+3. A collector thread that assembles chunks into batches of `buffer_size` rows, optionally shuffled before yielding
 
-### Dataset
+The batch channel has capacity `prefetch_factor`, so the next batch can be prepared while the current one is consumed. Combined row-group and buffer shuffling gives approximate uniform random sampling.
 
-`Dataset` first validates the files' schema before building a global index of `row_groups`. The index is an array of 
-`RowGroupMeta` that stores a local row group index (within a file) as well as an offset corresponding to the 
-index of the first row of a row group in the global flattened dataset. At this point no data is loaded but only the
-parquet files' metadata required to build the index and selecting rows during batch creation.
-
-It exposes a method to read a slice within a given `row_group`
-
-### Dataloader
-
-`Dataloader` is an iterator bounded by `num_steps` that returns a `Batch` each time. On initialization, the iterator
-spawn a pool of threads:
-1. a thread that emit chunks of rows groups to a chunk channel (feeder), from optionally shuffled row groups.
-2. `num_workers` threads that read chunks from the chunk channel, load them from disk and send to a data channel (workers)
-3. a thread that collects chunks from the data channel until it has > `buffer_size` rows, concatenates them and sends to a batch channel (collector)
-
-The buffer is optionally shuffled such that with the row group shuffling, uniform random sampling is approximated.
-The buffer channel has a capacity `prefetch_factor` such that another buffer can be prepared while the current buffer is being consumed, smoothing throughput.
-
-### Batch
-
-It is a light wrapper around an arrow array's `RecordBatch` containing the data. `Columns` are transmitted to the 
-python interpreter using a `PyCapsule` to avoid copying the data. On the python side, this is transformed to a dict of 
-numpy's ndarrays without copy when possible.
-
-### Notes
-
-* For epoch style training, one must set `num_steps = len(df) / batch_size`
+Columns are transferred to Python via Arrow PyCapsule — zero-copy for dense numeric columns, one copy for nullable or string columns.
 
 ## Usage
 
 ```python
-parquet_files = [...]
-ds = Dataset(parquet_files, columns=["a", "b"]) # optionally select subset of columns
+from parqstream import Dataset, DataLoader
+
+ds = Dataset(["part1.parquet", "part2.parquet"], columns=["a", "b"])
+
 loader = DataLoader(
-    ds, 
+    ds,
     batch_size=256,
-    num_steps=4, # will generate 4 batches
-    shuffle=True, # uniform random sampling with replacement
+    num_steps=1000,  # total batches to yield
+    shuffle=True,  # approximate uniform random sampling
     num_workers=4,
-    prefetch_factor =2,
-    buffer_size=100_000 # number of rows loaded in memory
+    prefetch_factor=2,
+    buffer_size=100_000,  # rows held in memory at once
 )
 
 for batch in loader:
-    a = batch["a"] # numpy array as a view over an arrow array
+    a = batch["a"]  # np.ndarray, zero-copy for dense numeric columns
     b = batch["b"]
-
-    ...
 ```
+
+For epoch-style training, set `num_steps = len(ds) // batch_size`.
 
 ## Local development
 
-Make sure uv and rust compiler is installed.
+Requirements: [uv](https://github.com/astral-sh/uv), Rust toolchain
 
-Clone the project: `git clone git@github.com:clabrugere/parqstream.git`
+```bash
+git clone git@github.com:clabrugere/parqstream.git
+cd parqstream
+uv sync --extra dev  # install dev dependencies
+maturin develop  # build Rust core and install into the venv
+uv run pytest python/tests --verbose
+```
 
-Install the development environment: `cd parqstream && uv sync --extra dev`
+## Benchmarks
 
-Build the rust core and install it in the local python environment: `maturin develop`
+Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 float32 columns, ~2GB on disk).
 
-Run tests: `uv run pytest python/tests --verbose`
+**Sequential**
+
+| batch_size | w=1 | w=2 | w=4 | w=6 |
+|---|---|---|---|---|
+| 1024 | 29.5M rows/s | 43.8M rows/s | 43.1M rows/s | 40.0M rows/s |
+| 2048 | 30.6M rows/s | 47.1M rows/s | 59.5M rows/s | 51.3M rows/s |
+| 4096 | 31.4M rows/s | 47.9M rows/s | **61.1M rows/s** | 54.3M rows/s |
+
+**Shuffled** (rows groups and buffer shuffle)
+
+| batch_size | w=1 | w=2 | w=4 | w=6 |
+|---|---|---|---|---|
+| 1024 | 28.3M rows/s | 29.3M rows/s | 27.9M rows/s | 25.5M rows/s |
+| 2048 | 28.8M rows/s | 39.2M rows/s | 36.9M rows/s | 34.1M rows/s |
+| 4096 | 28.6M rows/s | 43.0M rows/s | **44.1M rows/s** | 41.2M rows/s |
+
+A first warm-up run is done over the whole data, so results are probably slightly optimistic because some low level 
+caching might be happening.
+
+To reproduce:
+```bash
+uv sync --extra bench
+uv run benchmarks/generate_data.py --rows 50_000_000 --shards 16 --output benchmarks/data
+bash benchmarks/run.sh
+```
 
 ## Potential improvements
- 
-* Parallel file validation and global index creation
-* Allow for infinite iteration by making `num_steps` an option
-* Allow for epoch style iterator
-* Seedable RNG
+
+- Parallel file validation and index creation
+- Infinite iteration (make `num_steps` optional)
+- Epoch-style iterator
+- Seedable RNG

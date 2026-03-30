@@ -5,7 +5,7 @@ import os
 import sys
 from datetime import datetime
 
-import parqstream
+from parqstream import DataLoader, Dataset
 from utils import Benchmark, measure_throughput, print_result, save_result
 
 logger = logging.getLogger(__name__)
@@ -19,14 +19,8 @@ def configs():
                 yield batch_size, num_workers, shuffle
 
 
-def run_sweep(
-    paths: list[str],
-    results_dir: str,
-    warm_steps: int,
-    prefetch_factor: int,
-    buffer_size: int,
-) -> list[dict]:
-    dataset = parqstream.Dataset(paths)
+def run_sweep(paths: list[str], results_dir: str, prefetch_factor: int, buffer_size: int) -> list[dict]:
+    dataset = Dataset(paths)
     total_rows = len(dataset)
     results = []
 
@@ -35,7 +29,7 @@ def run_sweep(
     for batch_size, num_workers, shuffle in configs():
         label = f"{'shuffled' if shuffle else 'sequential'} bs={batch_size:} w={num_workers}"
         num_steps = max(total_rows // batch_size, 1)  # full epoch
-        loader = parqstream.DataLoader(
+        loader = DataLoader(
             dataset,
             batch_size=batch_size,
             num_steps=num_steps,
@@ -45,13 +39,14 @@ def run_sweep(
             buffer_size=buffer_size,
         )
 
-        warm = parqstream.DataLoader(
+        # do a full pass over the data
+        warm = DataLoader(
             dataset,
             batch_size=batch_size,
-            num_steps=warm_steps,
+            num_steps=num_steps,
             shuffle=shuffle,
             num_workers=num_workers,
-            buffer_size=batch_size * warm_steps,
+            buffer_size=buffer_size,
         )
         for _ in warm:
             pass
@@ -79,7 +74,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", default="data/", help="Directory with .parquet shards")
     parser.add_argument("--results", default="results/", help="Output directory for JSON")
-    parser.add_argument("--warm-steps", type=int, default=10, help="Number of warmup steps to run before timing")
     parser.add_argument("--prefetch-factor", type=int, default=1, help="Number of buffers to prefetch")
     parser.add_argument("--buffer-size", type=int, default=100_000, help="Size of the buffer")
     args = parser.parse_args()
@@ -88,4 +82,4 @@ if __name__ == "__main__":
     if not paths:
         sys.exit(f"No .parquet files found in {args.data}. Run generate_data.py first.")
 
-    run_sweep(paths, args.results, args.warm_steps, args.prefetch_factor, args.buffer_size)
+    run_sweep(paths, args.results, args.prefetch_factor, args.buffer_size)

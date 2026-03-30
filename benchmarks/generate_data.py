@@ -33,8 +33,8 @@ def generate(num_rows: int, num_shards: int, output_dir: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate synthetic benchmark data")
-    parser.add_argument("--rows", type=int, default=1_000_000, help="Total rows to generate")
-    parser.add_argument("--shards", type=int, default=8, help="Number of Parquet shards")
+    parser.add_argument("--rows", type=int, default=50_000_000, help="Total rows to generate")
+    parser.add_argument("--shards", type=int, default=16, help="Number of Parquet shards")
     parser.add_argument("--output", default="data/", help="Output directory")
     args = parser.parse_args()
 
