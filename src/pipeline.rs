@@ -42,8 +42,8 @@ pub fn chunk_feeder(
             intra_row_group_offset = 0;
         }
         let row_group_idx = order[row_group_offset];
-        let (_, num_rows) = row_groups[row_group_idx];
-        let num_rows = chunk_size.min(num_rows - intra_row_group_offset);
+        let (_, row_group_length) = row_groups[row_group_idx];
+        let num_rows = chunk_size.min(row_group_length - intra_row_group_offset);
 
         if chunk_tx
             .send(Chunk {
@@ -56,14 +56,14 @@ pub fn chunk_feeder(
             break; // consumer dropped
         }
         intra_row_group_offset += num_rows;
-        if intra_row_group_offset >= num_rows {
+        if intra_row_group_offset >= row_group_length {
             row_group_offset += 1;
             intra_row_group_offset = 0;
         }
     }
 }
 
-// continuously reads chunks of rows from row groups and sends them to the data channel
+// reads chunks received from the chunk channel, gather rows and sends record batches to the batch channel
 pub fn read_feeder(
     chunk_rx: &Receiver<Chunk>,
     data_tx: &Sender<Result<RecordBatch>>,
