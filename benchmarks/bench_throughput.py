@@ -20,7 +20,7 @@ def configs():
 
 
 def run_sweep(paths: list[str], results_dir: str, prefetch_factor: int, buffer_size: int) -> list[dict]:
-    dataset = Dataset(paths)
+    dataset = parqstream.Dataset(paths)
     total_rows = len(dataset)
     results = []
 
@@ -40,12 +40,14 @@ def run_sweep(paths: list[str], results_dir: str, prefetch_factor: int, buffer_s
         )
 
         # do a full pass over the data
-        warm = DataLoader(
+        warm = parqstream.DataLoader(
             dataset,
             batch_size=batch_size,
             num_steps=num_steps,
+            num_steps=num_steps,
             shuffle=shuffle,
             num_workers=num_workers,
+            buffer_size=buffer_size,
             buffer_size=buffer_size,
         )
         for _ in warm:
@@ -82,4 +84,5 @@ if __name__ == "__main__":
     if not paths:
         sys.exit(f"No .parquet files found in {args.data}. Run generate_data.py first.")
 
+    run_sweep(paths, args.results, args.prefetch_factor, args.buffer_size)
     run_sweep(paths, args.results, args.prefetch_factor, args.buffer_size)

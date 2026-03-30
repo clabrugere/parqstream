@@ -27,8 +27,8 @@ ds = Dataset(["part1.parquet", "part2.parquet"], columns=["a", "b"])
 loader = DataLoader(
     ds,
     batch_size=256,
-    num_steps=1000,  # total batches to yield; omit for infinite iteration
-    shuffle=True,  # approximate uniform random sampling
+    num_steps=4, # will generate 4 batches
+    shuffle=True, # uniform random sampling with replacement
     num_workers=4,
     prefetch_factor=2,
     buffer_size=100_000,  # rows held in memory at once
@@ -38,8 +38,6 @@ for batch in loader:
     a = batch["a"]  # np.ndarray, zero-copy for dense numeric columns
     b = batch["b"]
 ```
-
-Pass `num_steps=None` (the default) for infinite iteration — the loader wraps around the dataset continuously. For a single epoch, set `num_steps = len(ds) // batch_size`.
 
 ## Local development
 
@@ -84,7 +82,8 @@ bash benchmarks/run.sh
 ```
 
 ## Potential improvements
-
-- Read from distributed remote blob storages
-- Parallel file validation and index creation
-- Seedable RNG
+ 
+* Parallel file validation and global index creation
+* Allow for infinite iteration by making `num_steps` an option
+* Allow for epoch style iterator
+* Seedable RNG
