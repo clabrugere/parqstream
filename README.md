@@ -67,6 +67,17 @@ for batch in loader:
     ...
 ```
 
+## Local development
+
+Make sure uv and rust compiler is installed.
+
+Clone the project: `git clone git@github.com:clabrugere/parqstream.git`
+
+Install the development environment: `cd parqstream && uv sync --extra dev`
+
+Build the rust core and install it in the local python environment: `maturin develop`
+
+Run tests: `uv run pytest python/tests --verbose`
 
 ## Potential improvements
  
