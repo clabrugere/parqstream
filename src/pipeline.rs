@@ -77,8 +77,8 @@ pub fn read_feeder(
     {
         let meta = &dataset.row_group_index[row_group_idx];
         match dataset.read_row_group_range(meta.file_idx, meta.row_group_idx, start_row, num_rows) {
-            Ok(b) => {
-                if data_tx.send(Ok(b)).is_err() {
+            Ok(chunk_data) => {
+                if data_tx.send(Ok(chunk_data)).is_err() {
                     break; // consumer dropped
                 }
             }
@@ -102,9 +102,9 @@ pub fn collector(
         let mut rows = 0;
         while rows < buffer_size {
             match data_rx.recv() {
-                Ok(Ok(chunk)) => {
-                    rows += chunk.num_rows();
-                    parts.push(chunk);
+                Ok(Ok(chunk_data)) => {
+                    rows += chunk_data.num_rows();
+                    parts.push(chunk_data);
                 }
                 Ok(Err(e)) => {
                     let _ = buffer_tx.send(Err(e));
@@ -114,7 +114,7 @@ pub fn collector(
             }
         }
         let buffer = match concat_batches(schema, &parts) {
-            Ok(b) => b,
+            Ok(buffer) => buffer,
             Err(e) => {
                 let _ = buffer_tx.send(Err(e.into()));
                 return; // error concatenating batches
