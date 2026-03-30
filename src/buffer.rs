@@ -12,12 +12,12 @@ use crate::error::Result;
 /// Shuffle of all rows in `buffer`.
 pub fn shuffle_buffer(buffer: &RecordBatch) -> Result<RecordBatch> {
     let mut rng = rand::rng();
-    let n: u32 = u32::try_from(buffer.num_rows())?;
+    let n = u32::try_from(buffer.num_rows())?;
     let mut indices = (0..n).collect::<Vec<_>>();
     indices.shuffle(&mut rng);
 
     let idx_arr = UInt32Array::from(indices);
-    let columns: Vec<_> = buffer
+    let columns = buffer
         .columns()
         .iter()
         .map(|col| take(col, &idx_arr, None))
@@ -50,6 +50,7 @@ impl Buffer {
     }
 
     pub fn take(&mut self, num_rows: usize, py: Python<'_>) -> Result<Option<RecordBatch>> {
+        // buffer has been exhausted, refill it by receiving data from the collector channel
         if self.need_refill(num_rows) {
             match py.detach(|| self.rx.recv()) {
                 Ok(Ok(buffer)) => {

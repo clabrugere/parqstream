@@ -7,9 +7,16 @@ use rand::prelude::*;
 use crate::dataset::Dataset;
 use crate::error::Result;
 
+#[derive(Debug)]
+pub struct Chunk {
+    pub row_group_idx: usize,
+    pub start_row: usize,
+    pub num_rows: usize,
+}
+
 // continuously sends row group read tasks to the chunk channel, shuffled if needed
 pub fn chunk_feeder(
-    chunk_tx: &Sender<(usize, usize, usize)>,
+    chunk_tx: &Sender<Chunk>,
     row_groups: &[(usize, usize)],
     chunk_size: usize,
     shuffle: bool,
@@ -36,15 +43,19 @@ pub fn chunk_feeder(
         }
         let row_group_idx = order[row_group_offset];
         let (_, num_rows) = row_groups[row_group_idx];
-        let len = chunk_size.min(num_rows - intra_row_group_offset);
+        let num_rows = chunk_size.min(num_rows - intra_row_group_offset);
 
         if chunk_tx
-            .send((row_group_idx, intra_row_group_offset, len))
+            .send(Chunk {
+                row_group_idx,
+                start_row: intra_row_group_offset,
+                num_rows,
+            })
             .is_err()
         {
             break; // consumer dropped
         }
-        intra_row_group_offset += len;
+        intra_row_group_offset += num_rows;
         if intra_row_group_offset >= num_rows {
             row_group_offset += 1;
             intra_row_group_offset = 0;
@@ -54,13 +65,18 @@ pub fn chunk_feeder(
 
 // continuously reads chunks of rows from row groups and sends them to the data channel
 pub fn read_feeder(
-    chunk_rx: &Receiver<(usize, usize, usize)>,
+    chunk_rx: &Receiver<Chunk>,
     data_tx: &Sender<Result<RecordBatch>>,
     dataset: &Dataset,
 ) {
-    for (rg_meta_idx, start, len) in chunk_rx {
-        let meta = &dataset.row_group_index[rg_meta_idx];
-        match dataset.read_row_group_range(meta.file_idx, meta.row_group_idx, start, len) {
+    for Chunk {
+        row_group_idx,
+        start_row,
+        num_rows,
+    } in chunk_rx
+    {
+        let meta = &dataset.row_group_index[row_group_idx];
+        match dataset.read_row_group_range(meta.file_idx, meta.row_group_idx, start_row, num_rows) {
             Ok(b) => {
                 if data_tx.send(Ok(b)).is_err() {
                     break; // consumer dropped
@@ -83,7 +99,7 @@ pub fn collector(
 ) {
     loop {
         let mut parts: Vec<RecordBatch> = Vec::new();
-        let mut rows = 0usize;
+        let mut rows = 0;
         while rows < buffer_size {
             match data_rx.recv() {
                 Ok(Ok(chunk)) => {

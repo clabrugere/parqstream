@@ -23,7 +23,7 @@ pub fn column_indices(schema: &SchemaRef, columns: &[String]) -> Result<Vec<usiz
                 .index_of(name)
                 .map_err(|_| Error::ColumnNotFound { name: name.clone() })
         })
-        .collect::<Result<Vec<usize>>>()?;
+        .collect::<Result<Vec<_>>>()?;
     indices.sort_unstable();
     Ok(indices)
 }

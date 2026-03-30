@@ -10,7 +10,7 @@ use crate::batch::Batch;
 use crate::buffer::Buffer;
 use crate::dataset::Dataset;
 use crate::error::{Error, Result};
-use crate::pipeline::{chunk_feeder, collector, read_feeder};
+use crate::pipeline::{chunk_feeder, collector, read_feeder, Chunk};
 
 /// Dataloader with prefetching.
 ///
@@ -50,13 +50,13 @@ impl DataLoader {
         let shuffle = self.shuffle;
 
         // Pre-compute row group layout for feeder (avoids capturing dataset Arc)
-        let row_groups: Vec<(usize, usize)> = dataset
+        let row_groups = dataset
             .row_group_index
             .iter()
             .map(|m| (m.row_offset, m.num_rows))
-            .collect();
+            .collect::<Vec<_>>();
 
-        let (chunk_tx, chunk_rx) = bounded::<(usize, usize, usize)>(self.num_workers * 2);
+        let (chunk_tx, chunk_rx) = bounded::<Chunk>(self.num_workers * 2);
         let (data_tx, data_rx) = bounded::<Result<RecordBatch>>(self.num_workers + 2);
         let (buffer_tx, buffer_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
@@ -119,10 +119,10 @@ impl DataLoader {
             }
         }
 
-        let count = thread::available_parallelism()
+        let available_cores = thread::available_parallelism()
             .map_err(|e| Error::ThreadDetermination(e.to_string()))?
             .get();
-        let num_workers = num_workers.min(count).max(1);
+        let num_workers = num_workers.min(available_cores).max(1);
 
         Ok(Self {
             dataset: Arc::new(dataset.clone()),
