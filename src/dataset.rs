@@ -76,6 +76,15 @@ impl ParquetFile {
     pub fn num_row_groups(&self) -> usize {
         self.arrow_meta.metadata().num_row_groups()
     }
+
+    pub fn num_rows(&self, row_group_idx: usize) -> Result<usize> {
+        Ok(usize::try_from(
+            self.arrow_meta
+                .metadata()
+                .row_group(row_group_idx)
+                .num_rows(),
+        )?)
+    }
 }
 
 /// Reads only footer metadata at construction time, no data is loaded until `read_batch` is called.
@@ -112,13 +121,7 @@ impl Dataset {
         let projection = ProjectionMask::roots(parquet_file.parquet_schema(), col_indices);
 
         for row_group_idx in 0..parquet_file.num_row_groups() {
-            let num_rows = usize::try_from(
-                parquet_file
-                    .arrow_meta
-                    .metadata()
-                    .row_group(row_group_idx)
-                    .num_rows(),
-            )?;
+            let num_rows = parquet_file.num_rows(row_group_idx)?;
             row_group_index.push(RowGroupMeta {
                 file_idx,
                 row_group_idx,
@@ -138,13 +141,7 @@ impl Dataset {
             }
 
             for row_group_idx in 0..parquet_file.num_row_groups() {
-                let num_rows = usize::try_from(
-                    parquet_file
-                        .arrow_meta
-                        .metadata()
-                        .row_group(row_group_idx)
-                        .num_rows(),
-                )?;
+                let num_rows = parquet_file.num_rows(row_group_idx)?;
                 row_group_index.push(RowGroupMeta {
                     file_idx,
                     row_group_idx,
