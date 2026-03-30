@@ -10,6 +10,7 @@ use parquet::arrow::arrow_reader::{
     RowSelector,
 };
 use parquet::arrow::ProjectionMask;
+use parquet::schema::types::SchemaDescriptor;
 use pyo3::prelude::*;
 
 use crate::error::{Error, Result};
@@ -28,21 +29,6 @@ pub fn column_indices(schema: &SchemaRef, columns: &[String]) -> Result<Vec<usiz
     Ok(indices)
 }
 
-pub fn load_arrow_meta(path: impl AsRef<Path>) -> Result<ArrowReaderMetadata> {
-    let file = File::open(&path).map_err(|e| Error::OpenFile {
-        path: path.as_ref().to_path_buf(),
-        source: e,
-    })?;
-    let arrow_meta =
-        ArrowReaderMetadata::load(&file, ArrowReaderOptions::default()).map_err(|e| {
-            Error::ReadParquet {
-                path: path.as_ref().to_path_buf(),
-                source: e,
-            }
-        })?;
-    Ok(arrow_meta)
-}
-
 /// Metadata for a single Parquet row group, with its position in the global index.
 #[derive(Debug, Clone)]
 pub struct RowGroupMeta {
@@ -56,6 +42,40 @@ pub struct RowGroupMeta {
 pub struct ParquetFile {
     pub path: PathBuf,
     pub arrow_meta: ArrowReaderMetadata,
+}
+
+impl ParquetFile {
+    /// Load arrow metadata from a parquet file, returning an error if the file cannot be opened or read.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let file = File::open(&path).map_err(|e| Error::OpenFile {
+            path: path.as_ref().to_path_buf(),
+            source: e,
+        })?;
+        let arrow_meta =
+            ArrowReaderMetadata::load(&file, ArrowReaderOptions::default()).map_err(|e| {
+                Error::ReadParquet {
+                    path: path.as_ref().to_path_buf(),
+                    source: e,
+                }
+            })?;
+
+        Ok(Self {
+            path: path.as_ref().to_path_buf(),
+            arrow_meta,
+        })
+    }
+
+    pub fn parquet_schema(&self) -> &SchemaDescriptor {
+        self.arrow_meta.parquet_schema()
+    }
+
+    pub fn arrow_schema(&self) -> &SchemaRef {
+        self.arrow_meta.schema()
+    }
+
+    pub fn num_row_groups(&self) -> usize {
+        self.arrow_meta.metadata().num_row_groups()
+    }
 }
 
 /// Reads only footer metadata at construction time, no data is loaded until `read_batch` is called.
@@ -81,18 +101,24 @@ impl Dataset {
 
         // Read first file metadata to determine schema
         let (file_idx, first_path) = paths.next().ok_or(Error::EmptyPaths)?;
-        let arrow_meta = load_arrow_meta(&first_path)?;
+        //let arrow_meta = load_arrow_meta(&first_path)?;
+        let parquet_file = ParquetFile::load(&first_path)?;
 
-        let schema = arrow_meta.schema().clone();
+        let schema = parquet_file.arrow_schema().clone();
         let columns =
             columns.unwrap_or_else(|| schema.fields().iter().map(|f| f.name().clone()).collect());
         let col_indices = column_indices(&schema, &columns)?;
         let projected_schema = Arc::new(schema.project(&col_indices)?);
-        let projection = ProjectionMask::roots(arrow_meta.parquet_schema(), col_indices);
+        let projection = ProjectionMask::roots(parquet_file.parquet_schema(), col_indices);
 
-        for row_group_idx in 0..arrow_meta.metadata().num_row_groups() {
-            let num_rows =
-                usize::try_from(arrow_meta.metadata().row_group(row_group_idx).num_rows())?;
+        for row_group_idx in 0..parquet_file.num_row_groups() {
+            let num_rows = usize::try_from(
+                parquet_file
+                    .arrow_meta
+                    .metadata()
+                    .row_group(row_group_idx)
+                    .num_rows(),
+            )?;
             row_group_index.push(RowGroupMeta {
                 file_idx,
                 row_group_idx,
@@ -102,21 +128,23 @@ impl Dataset {
             total_rows += num_rows;
         }
 
-        files.push(ParquetFile {
-            path: first_path.into(),
-            arrow_meta: arrow_meta.clone(),
-        });
+        files.push(parquet_file);
 
         // Process remaining files, validating schema consistency and indexing row groups
         for (file_idx, path) in paths {
-            let arrow_meta = load_arrow_meta(&path)?;
-            if arrow_meta.schema().fields() != projected_schema.fields() {
+            let parquet_file = ParquetFile::load(&path)?;
+            if parquet_file.arrow_schema().fields() != projected_schema.fields() {
                 return Err(Error::SchemaMismatch { path: path.into() });
             }
 
-            for row_group_idx in 0..arrow_meta.metadata().num_row_groups() {
-                let num_rows =
-                    usize::try_from(arrow_meta.metadata().row_group(row_group_idx).num_rows())?;
+            for row_group_idx in 0..parquet_file.num_row_groups() {
+                let num_rows = usize::try_from(
+                    parquet_file
+                        .arrow_meta
+                        .metadata()
+                        .row_group(row_group_idx)
+                        .num_rows(),
+                )?;
                 row_group_index.push(RowGroupMeta {
                     file_idx,
                     row_group_idx,
@@ -126,10 +154,7 @@ impl Dataset {
                 total_rows += num_rows;
             }
 
-            files.push(ParquetFile {
-                path: path.into(),
-                arrow_meta: arrow_meta.clone(),
-            });
+            files.push(parquet_file);
         }
 
         Ok(Self {
