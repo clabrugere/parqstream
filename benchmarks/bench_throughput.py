@@ -14,13 +14,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 def configs():
     for shuffle in [False, True]:
-        for batch_size in [2048]:
-            for num_workers in [4]:
+        for batch_size in [1024, 2048, 4094]:
+            for num_workers in [1, 2, 4, 8]:
                 yield batch_size, num_workers, shuffle
 
 
 def run_sweep(paths: list[str], results_dir: str, prefetch_factor: int, buffer_size: int) -> list[dict]:
-    dataset = parqstream.Dataset(paths)
+    dataset = Dataset(paths)
     total_rows = len(dataset)
     results = []
 
@@ -40,14 +40,12 @@ def run_sweep(paths: list[str], results_dir: str, prefetch_factor: int, buffer_s
         )
 
         # do a full pass over the data
-        warm = parqstream.DataLoader(
+        warm = DataLoader(
             dataset,
             batch_size=batch_size,
             num_steps=num_steps,
-            num_steps=num_steps,
             shuffle=shuffle,
             num_workers=num_workers,
-            buffer_size=buffer_size,
             buffer_size=buffer_size,
         )
         for _ in warm:
