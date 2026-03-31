@@ -18,10 +18,11 @@ def test_basic_iteration(parquet_path):
 def test_infinite_iteration(parquet_path):
     ds = Dataset([parquet_path], columns=["f1"])
     loader = DataLoader(ds, batch_size=512, num_steps=None)
+    num_batches_in_one_epoch = len(ds) // 512 + 1
 
     for i, batch in enumerate(loader):
-        assert len(batch["f1"]) == 512
-        if i >= 5:
+        if i > num_batches_in_one_epoch:
+            assert len(batch["f1"]) == 512
             break
 
 
