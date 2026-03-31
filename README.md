@@ -27,7 +27,7 @@ ds = Dataset(["part1.parquet", "part2.parquet"], columns=["a", "b"])
 loader = DataLoader(
     ds,
     batch_size=256,
-    num_steps=4, # will generate 4 batches
+    num_steps=None, # will cycle through the dataset
     shuffle=True, # uniform random sampling with replacement
     num_workers=4,
     prefetch_factor=2,
@@ -84,6 +84,4 @@ bash benchmarks/run.sh
 ## Potential improvements
  
 * Parallel file validation and global index creation
-* Allow for infinite iteration by making `num_steps` an option
-* Allow for epoch style iterator
 * Seedable RNG
