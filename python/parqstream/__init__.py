@@ -20,13 +20,26 @@ class DataLoader:
     Backed by Rust workers that read and assemble Arrow batches off the GIL.
     Columns are transferred via the Arrow PyCapsule Interface — zero-copy for
     dense numeric columns, one copy for nullable or string columns.
+
+    Args:
+        dataset: Source dataset.
+        batch_size: Number of rows per batch.
+        num_steps: Total number of batches to yield. If `None` (default), the
+            loader cycles over the dataset indefinitely.
+        shuffle: If `True`, shuffles row-group order and buffer contents for
+            approximate uniform random sampling.
+        num_workers: Number of parallel reader threads.
+        prefetch_factor: Capacity of the batch channel; higher values pipeline
+            more batches ahead of consumption.
+        buffer_size: Number of rows to accumulate before slicing into batches.
+            If `None`, each row group is yielded as-is.
     """
 
     def __init__(
         self,
         dataset: Dataset,
         batch_size: int,
-        num_steps: int,
+        num_steps: int | None = None,
         shuffle: bool = False,
         num_workers: int = 1,
         prefetch_factor: int = 1,

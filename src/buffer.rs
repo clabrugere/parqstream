@@ -1,7 +1,7 @@
 use std::result::Result as StdResult;
 
 use arrow::array::UInt32Array;
-use arrow::compute::take;
+use arrow::compute::{concat_batches, take};
 use arrow::record_batch::RecordBatch;
 use crossbeam_channel::Receiver;
 use pyo3::Python;
@@ -49,26 +49,43 @@ impl Buffer {
             .is_none_or(|batch| self.offset + num_rows > batch.num_rows())
     }
 
-    pub fn take(&mut self, num_rows: usize, py: Python<'_>) -> Result<Option<RecordBatch>> {
-        // buffer has been exhausted, refill it by receiving data from the collector channel
-        if self.need_refill(num_rows) {
-            match py.detach(|| self.rx.recv()) {
-                Ok(Ok(buffer)) => {
-                    self.data = if self.shuffle {
-                        Some(shuffle_buffer(&buffer)?)
-                    } else {
-                        Some(buffer)
-                    };
-                    self.offset = 0;
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Ok(None), // channel closed, no more batches
+    // fetch the next buffer from the channel, stitching any remaining rows from the current buffer
+    fn refill(&mut self, py: Python<'_>) -> Result<bool> {
+        let remaining_rows = self.data.as_ref().and_then(|data| {
+            (self.offset < data.num_rows())
+                .then(|| data.slice(self.offset, data.num_rows() - self.offset))
+        });
+
+        match py.detach(|| self.rx.recv()) {
+            Ok(Ok(next)) => {
+                let next = if self.shuffle {
+                    shuffle_buffer(&next)?
+                } else {
+                    next
+                };
+                self.data = Some(match remaining_rows {
+                    Some(remaining_rows) => {
+                        concat_batches(&next.schema(), &[remaining_rows, next])?
+                    }
+                    None => next,
+                });
+                self.offset = 0;
+                Ok(true)
             }
+            Ok(Err(e)) => Err(e), // upstream error
+            Err(_) => Ok(false),  // channel closed, no more batches
+        }
+    }
+
+    pub fn take(&mut self, num_rows: usize, py: Python<'_>) -> Result<Option<RecordBatch>> {
+        if self.need_refill(num_rows) && !self.refill(py)? {
+            return Ok(None);
         }
 
-        let length = num_rows.min(self.data.as_ref().unwrap().num_rows() - self.offset);
-        let batch = self.data.as_ref().unwrap().slice(self.offset, length);
-        self.offset += batch.num_rows();
+        let data = self.data.as_ref().unwrap();
+        let length = num_rows.min(data.num_rows() - self.offset);
+        let batch = data.slice(self.offset, length);
+        self.offset += length;
         Ok(Some(batch))
     }
 }

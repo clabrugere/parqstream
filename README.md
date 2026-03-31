@@ -8,7 +8,7 @@ Streams batches from one or more Parquet files (sharing the same schema) without
 
 **`Dataset(paths, columns=None)`** — validates schemas across files and builds a global row-group index from Parquet metadata. No data is loaded at this stage. Optionally restricts to a subset of columns.
 
-**`DataLoader(dataset, batch_size, num_steps, ...)`** — iterator that yields `dict[str, np.ndarray]` batches. Internally spawns:
+**`DataLoader(dataset, batch_size, num_steps=None, ...)`** — iterator that yields `dict[str, np.ndarray]` batches. When `num_steps` is `None` the loader cycles over the dataset indefinitely. Internally spawns:
 1. A feeder thread that emits row-group chunks (optionally shuffled)
 2. `num_workers` worker threads that read chunks from disk off the GIL
 3. A collector thread that assembles chunks into batches of `buffer_size` rows, optionally shuffled before yielding
@@ -27,7 +27,7 @@ ds = Dataset(["part1.parquet", "part2.parquet"], columns=["a", "b"])
 loader = DataLoader(
     ds,
     batch_size=256,
-    num_steps=1000,  # total batches to yield
+    num_steps=1000,  # total batches to yield; omit for infinite iteration
     shuffle=True,  # approximate uniform random sampling
     num_workers=4,
     prefetch_factor=2,
@@ -39,7 +39,7 @@ for batch in loader:
     b = batch["b"]
 ```
 
-For epoch-style training, set `num_steps = len(ds) // batch_size`.
+Pass `num_steps=None` (the default) for infinite iteration — the loader wraps around the dataset continuously. For a single epoch, set `num_steps = len(ds) // batch_size`.
 
 ## Local development
 
@@ -85,7 +85,6 @@ bash benchmarks/run.sh
 
 ## Potential improvements
 
+- Read from distributed remote blob storages
 - Parallel file validation and index creation
-- Infinite iteration (make `num_steps` optional)
-- Epoch-style iterator
 - Seedable RNG

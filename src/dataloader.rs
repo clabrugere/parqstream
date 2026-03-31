@@ -28,14 +28,14 @@ use crate::pipeline::{chunk_feeder, collector, read_feeder, Chunk};
 pub struct DataLoader {
     dataset: Arc<Dataset>,
     batch_size: usize,
-    num_steps: usize,
+    num_steps: Option<usize>,
     shuffle: bool,
     num_workers: usize,
     prefetch_factor: usize,
     buffer_size: Option<usize>,
     // iteration state
     buffer: Option<Buffer>,
-    steps_remaining: usize,
+    steps_remaining: Option<usize>,
 }
 
 impl DataLoader {
@@ -86,7 +86,7 @@ impl DataLoader {
     #[pyo3(signature = (
         dataset,
         batch_size,
-        num_steps,
+        num_steps = None,
         shuffle = false,
         num_workers = 4,
         prefetch_factor = 1,
@@ -95,7 +95,7 @@ impl DataLoader {
     pub fn py_new(
         dataset: &Dataset,
         batch_size: usize,
-        num_steps: usize,
+        num_steps: Option<usize>,
         shuffle: bool,
         num_workers: usize,
         prefetch_factor: usize,
@@ -104,8 +104,10 @@ impl DataLoader {
         if batch_size == 0 {
             return Err(PyValueError::new_err("batch_size must be > 0"));
         }
-        if num_steps == 0 {
-            return Err(PyValueError::new_err("num_steps must be > 0"));
+        if let Some(num_steps) = num_steps {
+            if num_steps == 0 {
+                return Err(PyValueError::new_err("num_steps must be > 0"));
+            }
         }
         if num_workers == 0 {
             return Err(PyValueError::new_err("num_workers must be > 0"));
@@ -133,7 +135,7 @@ impl DataLoader {
             shuffle,
             buffer_size,
             buffer: None,
-            steps_remaining: 0,
+            steps_remaining: None,
         })
     }
 
@@ -147,7 +149,7 @@ impl DataLoader {
     /// Return the next `Batch`, or raise `StopIteration` when the pipeline is exhausted.
     pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Batch> {
         let batch_size = slf.batch_size;
-        if slf.steps_remaining == 0 {
+        if slf.steps_remaining == Some(0) {
             return Err(PyStopIteration::new_err("dataloader consumed"));
         }
         let Some(buffer) = slf.buffer.as_mut() else {
@@ -155,7 +157,9 @@ impl DataLoader {
         };
         match buffer.take(batch_size, py) {
             Ok(Some(batch)) => {
-                slf.steps_remaining -= 1;
+                if let Some(steps_remaining) = slf.steps_remaining.as_mut() {
+                    *steps_remaining -= 1;
+                }
                 Ok(Batch::new(batch))
             }
             Ok(None) => Err(PyStopIteration::new_err("dataloader consumed")),
@@ -165,7 +169,7 @@ impl DataLoader {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={}, num_workers={}, prefetch_factor={}, buffer_size={:?})",
+            "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={:?}, num_workers={}, prefetch_factor={}, buffer_size={:?})",
             self.dataset.total_rows,
             self.dataset.columns,
             self.batch_size,
