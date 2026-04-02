@@ -25,3 +25,4 @@ __pycache__
 ARCHITECTURE.md
 data/
 results/
+uv.lock
