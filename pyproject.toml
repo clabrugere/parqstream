@@ -12,6 +12,7 @@ dependencies = ["numpy", "pyarrow"]
 [project.optional-dependencies]
 dev = ["maturin", "pytest", "torch"]
 bench = ["torch", "psutil", "matplotlib", "pynvml"]
+build_wheel = ["maturin[zig]"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }

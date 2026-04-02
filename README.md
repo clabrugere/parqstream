@@ -74,11 +74,35 @@ Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 fl
 A first warm-up run is done over the whole data, so results are probably slightly optimistic because some low level 
 caching might be happening.
 
+**GPU training** (NVIDIA A10G, 10M rows across 16 shards, 100 float32 features, 10 classes)
+
+135M-parameter MLP (100→8192→8192→8192→10), batch size 65,536, 8 workers, shuffled.
+
+| metric | value |
+|---|---|
+| rows/s | 26,800 |
+| GPU utilization | 99.98% |
+| VRAM used | 12.8 / 24 GB |
+| data pipeline overhead | 0.9% |
+| compute time / step | 2.42s |
+
+The data pipeline accounts for less than 1% of step time showing that the loader keeps the GPU fully saturated.
+
 To reproduce:
 ```bash
 uv sync --extra bench
 uv run benchmarks/generate_data.py --rows 50_000_000 --shards 16 --output benchmarks/data
 bash benchmarks/run.sh
+```
+
+## Build
+ 
+If you want to compile targeting an architecture (for example x86_64 linux):
+
+```bash
+uv sync --extra build_wheel
+rustup target add x86_64-unknown-linux-gnu
+maturin build --release --target x86_64-unknown-linux-gnu --zig
 ```
 
 ## Potential improvements
