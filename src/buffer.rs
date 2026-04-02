@@ -10,11 +10,10 @@ use rand::prelude::*;
 use crate::error::Result;
 
 /// Shuffle of all rows in `buffer`.
-pub fn shuffle_buffer(buffer: &RecordBatch) -> Result<RecordBatch> {
-    let mut rng = rand::rng();
+pub fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<RecordBatch> {
     let n = u32::try_from(buffer.num_rows())?;
     let mut indices = (0..n).collect::<Vec<_>>();
-    indices.shuffle(&mut rng);
+    indices.shuffle(rng);
 
     let idx_arr = UInt32Array::from(indices);
     let columns = buffer
@@ -31,15 +30,18 @@ pub struct Buffer {
     shuffle: bool,
     data: Option<RecordBatch>,
     offset: usize,
+    rng: SmallRng,
 }
 
 impl Buffer {
-    pub fn new(rx: Receiver<Result<RecordBatch>>, shuffle: bool) -> Self {
+    pub fn new(rx: Receiver<Result<RecordBatch>>, shuffle: bool, seed: Option<u64>) -> Self {
+        let rng = seed.map_or_else(rand::make_rng, SmallRng::seed_from_u64);
         Self {
             rx,
             shuffle,
             data: None,
             offset: 0,
+            rng,
         }
     }
 
@@ -59,7 +61,7 @@ impl Buffer {
         match py.detach(|| self.rx.recv()) {
             Ok(Ok(next)) => {
                 let next = if self.shuffle {
-                    shuffle_buffer(&next)?
+                    shuffle_buffer(&next, &mut self.rng)?
                 } else {
                     next
                 };

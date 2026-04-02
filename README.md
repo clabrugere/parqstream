@@ -108,4 +108,3 @@ maturin build --release --target x86_64-unknown-linux-gnu --zig
 ## Potential improvements
  
 * Parallel file validation and global index creation
-* Seedable RNG

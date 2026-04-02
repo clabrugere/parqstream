@@ -33,14 +33,16 @@ pub struct DataLoader {
     num_workers: usize,
     prefetch_factor: usize,
     buffer_size: Option<usize>,
+    seed: Option<u64>,
     // iteration state
+    epoch_counter: usize,
     buffer: Option<Buffer>,
     steps_remaining: Option<usize>,
 }
 
 impl DataLoader {
     /// Spawn the feeder and worker threads and return the batch receiver
-    fn spawn_pipeline(&self) -> Receiver<Result<RecordBatch>> {
+    fn spawn_pipeline(&self, seed: Option<u64>) -> Receiver<Result<RecordBatch>> {
         let dataset = self.dataset.clone();
         let buffer_size = self
             .buffer_size
@@ -61,7 +63,9 @@ impl DataLoader {
         let (buffer_tx, buffer_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
         // chunk feeder sending row group read tasks to workers
-        thread::spawn(move || chunk_feeder(&chunk_tx, &row_groups, chunk_size, shuffle));
+        thread::spawn(move || {
+            chunk_feeder(&chunk_tx, &row_groups, chunk_size, shuffle, seed);
+        });
 
         // workers read a contiguous chunk from a row group
         for _ in 0..self.num_workers {
@@ -91,6 +95,7 @@ impl DataLoader {
         num_workers = 4,
         prefetch_factor = 1,
         buffer_size = None,
+        seed = None,
     ))]
     pub fn py_new(
         dataset: &Dataset,
@@ -100,6 +105,7 @@ impl DataLoader {
         num_workers: usize,
         prefetch_factor: usize,
         buffer_size: Option<usize>,
+        seed: Option<u64>,
     ) -> PyResult<Self> {
         if batch_size == 0 {
             return Err(PyValueError::new_err("batch_size must be > 0"));
@@ -134,15 +140,20 @@ impl DataLoader {
             prefetch_factor,
             shuffle,
             buffer_size,
+            epoch_counter: 0,
             buffer: None,
             steps_remaining: None,
+            seed,
         })
     }
 
     /// Start (or restart) the prefetch pipeline and return `self`.
     pub fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf.buffer = Some(Buffer::new(slf.spawn_pipeline(), slf.shuffle));
+        let seed = slf.seed.map(|s| s + slf.epoch_counter as u64);
+        let buffer_rx = slf.spawn_pipeline(seed);
+        slf.buffer = Some(Buffer::new(buffer_rx, slf.shuffle, seed));
         slf.steps_remaining = slf.num_steps;
+        slf.epoch_counter += 1;
         slf
     }
 

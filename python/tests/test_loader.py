@@ -207,6 +207,38 @@ def test_no_row_skip_batch_not_divisible_by_buffer(parquet_path):
     assert np.array_equal(all_ids, np.arange(num_steps * batch_size, dtype=np.int64))
 
 
+def test_seeded_shuffle_is_reproducible(parquet_path):
+    ds = Dataset([parquet_path], columns=["id"])
+    kwargs = dict(batch_size=512, num_steps=10, shuffle=True, seed=42)
+
+    ids_a = [batch["id"].tolist() for batch in DataLoader(ds, **kwargs)]
+    ids_b = [batch["id"].tolist() for batch in DataLoader(ds, **kwargs)]
+
+    assert ids_a == ids_b
+
+
+def test_seeded_shuffle_differs_each_epoch(parquet_path):
+    # Each __iter__ call should produce a different order (different epoch seed),
+    # otherwise the model sees the same batch sequence every epoch.
+    ds = Dataset([parquet_path], columns=["id"])
+    loader = DataLoader(ds, batch_size=512, num_steps=10, shuffle=True, seed=42)
+
+    ids_a = [batch["id"].tolist() for batch in loader]
+    ids_b = [batch["id"].tolist() for batch in loader]
+
+    assert ids_a != ids_b
+
+
+def test_different_seeds_differ(parquet_path):
+    ds = Dataset([parquet_path], columns=["id"])
+    kwargs = dict(batch_size=512, num_steps=5, shuffle=True)
+
+    ids_42 = [batch["id"].tolist() for batch in DataLoader(ds, **kwargs, seed=42)]
+    ids_99 = [batch["id"].tolist() for batch in DataLoader(ds, **kwargs, seed=99)]
+
+    assert ids_42 != ids_99
+
+
 def test_no_row_skip_wrap_around_non_divisible(parquet_path):
     # Wrap past one full epoch with non-divisible sizes; rows must be contiguous across the dataset boundary with no gaps or duplicates.
     ds = Dataset([parquet_path], columns=["id"])

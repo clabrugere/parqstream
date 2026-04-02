@@ -20,10 +20,10 @@ pub fn chunk_feeder(
     row_groups: &[(usize, usize)],
     chunk_size: usize,
     shuffle: bool,
+    seed: Option<u64>,
 ) {
-    let mut rng = rand::rng();
     let num_groups = row_groups.len();
-
+    let mut rng = seed.map_or_else(rand::make_rng, SmallRng::seed_from_u64);
     let mut order = (0..num_groups).collect::<Vec<_>>();
     if shuffle {
         order.shuffle(&mut rng);

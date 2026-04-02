@@ -44,6 +44,7 @@ class DataLoader:
         num_workers: int = 1,
         prefetch_factor: int = 1,
         buffer_size: int | None = None,
+        seed: int | None = None,
     ) -> None:
         self._dataloader = _RustDataLoader(
             dataset._dataset,
@@ -53,6 +54,7 @@ class DataLoader:
             num_workers,
             prefetch_factor,
             buffer_size,
+            seed,
         )
 
     def __iter__(self) -> DataLoader:
