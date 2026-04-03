@@ -31,7 +31,8 @@ loader = DataLoader(
     shuffle=True, # uniform random sampling with replacement
     num_workers=4,
     prefetch_factor=2,
-    buffer_size=100_000,  # rows held in memory at once
+    buffer_size=100_000, # rows held in memory at once,
+    seed=42 # yield rows in the same order between two runs when shuffling is active
 )
 
 for batch in loader:
@@ -106,5 +107,7 @@ maturin build --release --target x86_64-unknown-linux-gnu --zig
 ```
 
 ## Potential improvements
- 
+
+* Support reading from remote storages
+* Support distributed training
 * Parallel file validation and global index creation
