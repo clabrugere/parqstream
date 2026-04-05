@@ -53,7 +53,7 @@ pub fn chunk_feeder(
             })
             .is_err()
         {
-            break; // consumer dropped
+            return; // consumer dropped
         }
         intra_row_group_offset += num_rows;
         if intra_row_group_offset >= row_group_length {
@@ -79,12 +79,12 @@ pub fn read_feeder(
         match dataset.read_row_group_range(meta.file_idx, meta.row_group_idx, start_row, num_rows) {
             Ok(chunk_data) => {
                 if data_tx.send(Ok(chunk_data)).is_err() {
-                    break; // consumer dropped
+                    return; // consumer dropped
                 }
             }
             Err(e) => {
                 let _ = data_tx.send(Err(e));
-                break; // upstream error
+                return; // upstream error
             }
         }
     }

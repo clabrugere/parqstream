@@ -28,7 +28,7 @@ loader = DataLoader(
     ds,
     batch_size=256,
     num_steps=None, # will cycle through the dataset
-    shuffle=True, # uniform random sampling with replacement
+    shuffle=True, # uniform random sampling
     num_workers=4,
     prefetch_factor=2,
     buffer_size=100_000, # rows held in memory at once,

@@ -23,6 +23,7 @@ __pycache__
 
 # others
 ARCHITECTURE.md
+ROADMAP.md
 data/
 results/
 uv.lock
