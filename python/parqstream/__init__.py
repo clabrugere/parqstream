@@ -58,7 +58,7 @@ class DataLoader:
         )
 
     def __iter__(self) -> DataLoader:
-        iter(self._dataloader)
+        self._dataloader.__iter__()
         return self
 
     def __next__(self) -> dict[str, np.ndarray]:
@@ -70,7 +70,7 @@ class DataLoader:
 
 
 class Dataset:
-    """Dataset representing distributed over one or more Parquet files only read as needed."""
+    """Dataset distributed over one or more Parquet files only read as needed."""
 
     def __init__(self, paths: list[str], columns: list[str] | None = None) -> None:
         self._dataset = _RustDataset(paths, columns)

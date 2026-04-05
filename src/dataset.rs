@@ -110,7 +110,6 @@ impl Dataset {
 
         // Read first file metadata to determine schema
         let (file_idx, first_path) = paths.next().ok_or(Error::EmptyPaths)?;
-        //let arrow_meta = load_arrow_meta(&first_path)?;
         let parquet_file = ParquetFile::load(&first_path)?;
 
         let schema = parquet_file.arrow_schema().clone();
@@ -172,8 +171,9 @@ impl Dataset {
         len: usize,
     ) -> Result<RecordBatch> {
         let parquet_file = &self.files[file_idx];
-        let file = File::open(parquet_file.path.clone()).map_err(|e| Error::OpenFile {
-            path: parquet_file.path.clone(),
+        let path = parquet_file.path.clone();
+        let file = File::open(&path).map_err(|e| Error::OpenFile {
+            path: path,
             source: e,
         })?;
 

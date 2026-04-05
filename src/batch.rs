@@ -1,4 +1,3 @@
-use std::ffi::CString;
 use std::sync::Arc;
 
 use arrow::array::Array;
@@ -11,18 +10,11 @@ use pyo3::types::PyCapsule;
 #[pyclass]
 pub struct Batch {
     data: RecordBatch,
-    columns: Vec<String>,
 }
 
 impl Batch {
     pub fn new(data: RecordBatch) -> Self {
-        let columns = data
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect();
-        Self { data, columns }
+        Self { data }
     }
 }
 
@@ -41,7 +33,12 @@ impl Column {
 impl Batch {
     #[getter]
     fn columns(&self) -> Vec<String> {
-        self.columns.clone()
+        self.data
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
     }
 
     fn column(&self, name: &str) -> PyResult<Column> {
@@ -69,9 +66,8 @@ impl Column {
         let (ffi_array, ffi_schema) = ffi::to_ffi(&self.array.to_data())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-        let schema_cap =
-            PyCapsule::new(py, ffi_schema, Some(CString::new("arrow_schema").unwrap()))?;
-        let array_cap = PyCapsule::new(py, ffi_array, Some(CString::new("arrow_array").unwrap()))?;
+        let schema_cap = PyCapsule::new(py, ffi_schema, Some(c"arrow_schema".to_owned()))?;
+        let array_cap = PyCapsule::new(py, ffi_array, Some(c"arrow_array".to_owned()))?;
 
         Ok((schema_cap, array_cap))
     }
