@@ -109,7 +109,7 @@ impl Dataset {
         let mut total_rows = 0;
 
         // Read first file metadata to determine schema
-        let (file_idx, first_path) = paths.next().ok_or(Error::EmptyPaths)?;
+        let (_, first_path) = paths.next().ok_or(Error::EmptyPaths)?;
         let parquet_file = ParquetFile::load(&first_path)?;
 
         let schema = parquet_file.arrow_schema().clone();
@@ -163,10 +163,7 @@ impl Dataset {
     ) -> Result<RecordBatch> {
         let parquet_file = &self.files[file_idx];
         let path = parquet_file.path.clone();
-        let file = File::open(&path).map_err(|e| Error::OpenFile {
-            path: path,
-            source: e,
-        })?;
+        let file = File::open(&path).map_err(|e| Error::OpenFile { path, source: e })?;
 
         // skip first `start`rows and read `len` following rows
         let mut selectors = Vec::with_capacity(2);
