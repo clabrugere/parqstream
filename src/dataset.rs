@@ -119,26 +119,19 @@ impl Dataset {
         let projected_schema = Arc::new(schema.project(&col_indices)?);
         let projection = ProjectionMask::roots(parquet_file.parquet_schema(), col_indices);
 
-        for row_group_idx in 0..parquet_file.num_row_groups() {
-            let num_rows = parquet_file.num_rows(row_group_idx)?;
-            row_group_index.push(RowGroupMeta {
-                file_idx,
-                row_group_idx,
-                row_offset: total_rows,
-                num_rows,
-            });
-            total_rows += num_rows;
-        }
-
         files.push(parquet_file);
 
-        // Process remaining files, validating schema consistency and indexing row groups
-        for (file_idx, path) in paths {
+        // Process remaining files, validating schema consistency
+        for (_, path) in paths {
             let parquet_file = ParquetFile::load(&path)?;
             if parquet_file.arrow_schema().fields() != projected_schema.fields() {
                 return Err(Error::SchemaMismatch { path: path.into() });
             }
+            files.push(parquet_file);
+        }
 
+        // Index row groups across all files
+        for (file_idx, parquet_file) in files.iter().enumerate() {
             for row_group_idx in 0..parquet_file.num_row_groups() {
                 let num_rows = parquet_file.num_rows(row_group_idx)?;
                 row_group_index.push(RowGroupMeta {
@@ -149,8 +142,6 @@ impl Dataset {
                 });
                 total_rows += num_rows;
             }
-
-            files.push(parquet_file);
         }
 
         Ok(Self {
