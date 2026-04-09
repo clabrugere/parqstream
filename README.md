@@ -1,8 +1,17 @@
-# parqstream
+<br />
+<p align="center">
+    <a href="https://github.com/clabrugere/parqstream#gh-light-mode-only" class="only-light">
+      <img src="./assets/parqstream-light.png" width="50%"/>
+    </a>
+    <a href="https://github.com/clabrugere/parqstream#gh-dark-mode-only" class="only-dark">
+      <img src="./assets/parqstream-dark.png" width="50%"/>
+    </a>
+</p>
 
-High-performance tabular dataloader for deep learning, backed by a Rust core.
+<h2><p align="center">High-performance tabular dataloader for deep learning</p></h2>
 
-Streams batches from one or more Parquet files (sharing the same schema) without loading everything into memory. Supports sequential reads and approximate uniform random sampling, with multi-threaded prefetching and zero-copy column transfer via the Arrow PyCapsule Interface.
+
+Stream batches from Parquet files without loading everything into memory. Supports sequential reads and approximate uniform random sampling, with multi-threaded prefetching and zero-copy column transfer via the Arrow PyCapsule Interface.
 
 ## API
 
@@ -106,8 +115,9 @@ rustup target add x86_64-unknown-linux-gnu
 maturin build --release --target x86_64-unknown-linux-gnu --zig
 ```
 
-## Potential improvements
+## Improvements
 
 * Support reading from remote storages
 * Support distributed training
+* State serialization for recovery
 * Parallel file validation and global index creation
