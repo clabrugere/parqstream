@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pyarrow as pa
 
@@ -11,7 +13,13 @@ __all__ = ["Dataset", "DataLoader"]
 
 
 def _col_to_numpy(col: Column) -> np.ndarray:
-    return pa.array(col).to_numpy(zero_copy_only=False)
+    name = getattr(col, "name", "<unknown>")
+    array = pa.array(col)
+    try:
+        return array.to_numpy(zero_copy_only=True)
+    except pa.ArrowInvalid:
+        warnings.warn(f"Column '{name}' cannot be zero-copied; falling back to one-copy conversion", UserWarning)
+        return array.to_numpy(zero_copy_only=False)
 
 
 class DataLoader:
@@ -63,7 +71,10 @@ class DataLoader:
 
     def __next__(self) -> dict[str, np.ndarray]:
         batch = next(self._dataloader)
-        return {name: _col_to_numpy(batch.column(name)) for name in batch.columns}
+        return {col.name: _col_to_numpy(col) for col in batch.columns()}
+
+    def __len__(self) -> int:
+        return len(self._dataloader)
 
     def __repr__(self) -> str:
         return repr(self._dataloader)

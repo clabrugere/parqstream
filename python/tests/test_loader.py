@@ -1,7 +1,24 @@
 import numpy as np
+import pyarrow as pa
 import pytest
 import torch
-from parqstream import DataLoader, Dataset
+from parqstream import DataLoader, Dataset, _col_to_numpy
+
+
+def test_zero_copy_column():
+    arr = pa.array([1.0, 2.0, 3.0], type=pa.float64())
+    col = arr  # or a Column wrapping it
+    result = _col_to_numpy(col)
+    assert np.shares_memory(result, arr.buffers()[1])  # same underlying buffer
+
+
+def test_copy_fallback_column():
+    arr = pa.array([1, None, 3], type=pa.int64())
+    col = arr
+    with pytest.warns(UserWarning, match="falling back"):  # or check logger
+        result = _col_to_numpy(col)
+    assert not np.shares_memory(result, arr.buffers()[1])
+    assert np.isnan(result[1])  # null becomes NaN
 
 
 def test_basic_iteration(parquet_path):
@@ -95,17 +112,6 @@ def test_torch_tensor(parquet_path):
 
         assert x.dtype == torch.float32
         assert y.dtype == torch.int32
-
-
-def test_torch_from_numpy_zero_copy(parquet_path):
-    ds = Dataset([parquet_path], columns=["f1"])
-    loader = DataLoader(ds, batch_size=256, num_steps=1)
-
-    for batch in loader:
-        with pytest.warns(UserWarning, match="The given NumPy array is not writable") as record:
-            _ = torch.from_numpy(batch["f1"])
-
-        assert len(record) == 1
 
 
 def test_sequential_order(parquet_path):
@@ -259,3 +265,24 @@ def test_no_row_skip_wrap_around_non_divisible(parquet_path):
 
     assert len(all_ids) == num_steps * batch_size
     assert np.array_equal(all_ids, expected)
+
+
+def test_len(parquet_path):
+    ds = Dataset([parquet_path], columns=["id"])
+    loader = DataLoader(ds, batch_size=512, num_steps=10)
+
+    assert len(loader) == 10
+
+    i = 0
+    for _ in loader:
+        i += 1
+
+    assert len(loader) == i
+
+
+def test_len_infinite(parquet_path):
+    ds = Dataset([parquet_path], columns=["id"])
+    loader = DataLoader(ds, batch_size=512, num_steps=None)
+
+    with pytest.raises(ValueError, match="length is undefined for infinite dataloader"):
+        len(loader)

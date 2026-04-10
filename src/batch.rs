@@ -21,23 +21,23 @@ impl Batch {
 #[pyclass]
 pub struct Column {
     array: Arc<dyn Array>,
+    name: String,
 }
 
 impl Column {
-    pub fn new(array: Arc<dyn Array>) -> Self {
-        Self { array }
+    pub fn new(array: Arc<dyn Array>, name: String) -> Self {
+        Self { array, name }
     }
 }
 
 #[pymethods]
 impl Batch {
-    #[getter]
-    fn columns(&self) -> Vec<String> {
+    fn columns(&self) -> Vec<Column> {
         self.data
-            .schema()
-            .fields()
+            .columns()
             .iter()
-            .map(|f| f.name().clone())
+            .zip(self.data.schema().fields())
+            .map(|(array, field)| Column::new(array.clone(), field.name().clone()))
             .collect()
     }
 
@@ -46,7 +46,7 @@ impl Batch {
             .data
             .column_by_name(name)
             .ok_or_else(|| PyKeyError::new_err(format!("no column '{name}'")))?;
-        Ok(Column::new(array.clone()))
+        Ok(Column::new(array.clone(), name.to_string()))
     }
 
     fn __len__(&self) -> usize {
@@ -70,5 +70,10 @@ impl Column {
         let array_cap = PyCapsule::new(py, ffi_array, Some(c"arrow_array".to_owned()))?;
 
         Ok((schema_cap, array_cap))
+    }
+
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
     }
 }

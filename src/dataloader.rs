@@ -178,6 +178,16 @@ impl DataLoader {
         }
     }
 
+    pub fn __len__(&self) -> PyResult<usize> {
+        if let Some(num_steps) = self.num_steps {
+            Ok(num_steps)
+        } else {
+            Err(PyValueError::new_err(
+                "length is undefined for infinite dataloader; set num_steps to a finite value to enable __len__"
+            ))
+        }
+    }
+
     pub fn __repr__(&self) -> String {
         format!(
             "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={:?}, num_workers={}, prefetch_factor={}, buffer_size={:?})",
