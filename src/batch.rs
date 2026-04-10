@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use arrow::array::Array;
+use arrow::array::{Array, RecordBatchIterator};
 use arrow::ffi;
+use arrow::ffi_stream::FFI_ArrowArrayStream;
 use arrow::record_batch::RecordBatch;
 use pyo3::exceptions::{PyKeyError, PyRuntimeError};
 use pyo3::prelude::*;
@@ -47,6 +48,21 @@ impl Batch {
             .column_by_name(name)
             .ok_or_else(|| PyKeyError::new_err(format!("no column '{name}'")))?;
         Ok(Column::new(array.clone(), name.to_string()))
+    }
+
+    fn __arrow_c_stream__<'py>(
+        &self,
+        py: Python<'py>,
+        _requested_schema: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        let schema = self.data.schema();
+        let batch = self.data.clone();
+        let iterator = std::iter::once(Ok(batch));
+
+        let reader = RecordBatchIterator::new(iterator, schema);
+        let stream = FFI_ArrowArrayStream::new(Box::new(reader));
+        PyCapsule::new(py, stream, Some(c"arrow_array_stream".to_owned()))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     fn __len__(&self) -> usize {

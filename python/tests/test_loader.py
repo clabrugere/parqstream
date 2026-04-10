@@ -286,3 +286,16 @@ def test_len_infinite(parquet_path):
 
     with pytest.raises(ValueError, match="length is undefined for infinite dataloader"):
         len(loader)
+
+
+def test_collate_fn_returns_record_batch(parquet_path):
+    ds = Dataset([parquet_path], columns=["f1", "label"])
+    loader = DataLoader(
+        ds,
+        batch_size=256,
+        num_steps=2,
+        collate_fn=lambda b: pa.RecordBatchReader.from_stream(b).read_next_batch(),
+    )
+    for rb in loader:
+        assert isinstance(rb, pa.RecordBatch)
+        assert len(rb) == 256

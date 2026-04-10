@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from typing import Any, Callable
 
 import numpy as np
 import pyarrow as pa
@@ -53,6 +54,7 @@ class DataLoader:
         prefetch_factor: int = 1,
         buffer_size: int | None = None,
         seed: int | None = None,
+        collate_fn: Callable | None = None,
     ) -> None:
         self._dataloader = _RustDataLoader(
             dataset._dataset,
@@ -64,13 +66,18 @@ class DataLoader:
             buffer_size,
             seed,
         )
+        self._collate_fn = collate_fn
 
     def __iter__(self) -> DataLoader:
         self._dataloader.__iter__()
         return self
 
-    def __next__(self) -> dict[str, np.ndarray]:
+    def __next__(self) -> dict[str, np.ndarray] | Any:
         batch = next(self._dataloader)
+
+        if self._collate_fn is not None:
+            return self._collate_fn(batch)
+
         return {col.name: _col_to_numpy(col) for col in batch.columns()}
 
     def __len__(self) -> int:
