@@ -102,18 +102,6 @@ def test_large_prefetch(parquet_path):
     assert sum(1 for _ in loader) == 9
 
 
-def test_torch_tensor(parquet_path):
-    ds = Dataset([parquet_path], columns=["f1", "label"])
-    loader = DataLoader(ds, batch_size=256, num_steps=4)
-
-    for batch in loader:
-        x = torch.from_numpy(batch["f1"].copy())
-        y = torch.from_numpy(batch["label"].copy())
-
-        assert x.dtype == torch.float32
-        assert y.dtype == torch.int32
-
-
 def test_sequential_order(parquet_path):
     ds = Dataset([parquet_path], columns=["id"])
     batch_size = 1_000
@@ -299,3 +287,15 @@ def test_collate_fn_returns_record_batch(parquet_path):
     for rb in loader:
         assert isinstance(rb, pa.RecordBatch)
         assert len(rb) == 256
+
+
+def test_collate_fn_torch(parquet_path):
+    def collate_fn(batch):
+        return {col.name: torch.from_numpy(pa.array(col).to_numpy(zero_copy_only=False)) for col in batch.columns()}
+
+    ds = Dataset([parquet_path], columns=["f1", "label"])
+    loader = DataLoader(ds, batch_size=256, num_steps=4, collate_fn=collate_fn)
+
+    for batch in loader:
+        assert isinstance(batch["f1"], torch.Tensor)
+        assert isinstance(batch["label"], torch.Tensor)

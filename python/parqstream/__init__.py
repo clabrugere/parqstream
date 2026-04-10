@@ -42,6 +42,12 @@ class DataLoader:
             more batches ahead of consumption.
         buffer_size: Number of rows to accumulate before slicing into batches.
             If `None`, each row group is yielded as-is.
+        seed: Random seed for reproducible shuffling. Has no effect when
+            `shuffle` is `False`.
+        collate_fn: Optional callable that receives the raw `Batch` object and
+            returns whatever the iteration protocol should yield. When provided,
+            the default numpy conversion is bypassed entirely, so the callable
+            is responsible for all column extraction and type conversion.
     """
 
     def __init__(
@@ -88,7 +94,16 @@ class DataLoader:
 
 
 class Dataset:
-    """Dataset distributed over one or more Parquet files only read as needed."""
+    """Dataset distributed over one or more Parquet files only read as needed.
+
+    Parquet metadata (schema, row-group statistics) is read eagerly at
+    construction time; column data is read lazily by the dataloader workers.
+
+    Args:
+        paths: List of Parquet file paths to include in the dataset.
+        columns: Optional list of column names to project. If `None`, all
+            columns are read.
+    """
 
     def __init__(self, paths: list[str], columns: list[str] | None = None) -> None:
         self._dataset = _RustDataset(paths, columns)

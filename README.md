@@ -49,6 +49,25 @@ for batch in loader:
     b = batch["b"]
 ```
 
+To produce framework tensors instead of numpy arrays, pass a `collate_fn`. It receives the raw `Batch` object and its return value is yielded as-is, bypassing the default numpy conversion:
+
+```python
+import torch
+import pyarrow as pa
+from parqstream import Dataset, DataLoader
+
+def collate_fn(batch):
+    return {col.name: torch.from_numpy(pa.array(col).to_numpy(zero_copy_only=False)) for col in batch.columns()}
+
+ds = Dataset(["part1.parquet", "part2.parquet"], columns=["a", "b"])
+
+loader = DataLoader(ds, batch_size=256, collate_fn=collate_fn)
+
+for batch in loader:
+    a = batch["a"]  # torch.Tensor
+    b = batch["b"]
+```
+
 ## Local development
 
 Requirements: [uv](https://github.com/astral-sh/uv), Rust toolchain
