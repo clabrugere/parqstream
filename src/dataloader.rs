@@ -51,11 +51,11 @@ impl DataLoader {
         let chunk_size = (buffer_size + self.num_workers - 1).div_ceil(self.num_workers);
         let shuffle = self.shuffle;
 
-        // Pre-compute row group layout for feeder (avoids capturing dataset Arc)
-        let row_groups = dataset
+        // Pre-compute row group layout for feeder
+        let row_group_lengths = dataset
             .row_group_index
             .iter()
-            .map(|m| (m.row_offset, m.num_rows))
+            .map(|m| m.num_rows)
             .collect::<Vec<_>>();
 
         let (chunk_tx, chunk_rx) = bounded::<Chunk>(self.num_workers * 2);
@@ -64,7 +64,7 @@ impl DataLoader {
 
         // chunk feeder sending row group read tasks to workers
         thread::spawn(move || {
-            chunk_feeder(&chunk_tx, &row_groups, chunk_size, shuffle, seed);
+            chunk_feeder(&chunk_tx, &row_group_lengths, chunk_size, shuffle, seed);
         });
 
         // workers read a contiguous chunk from a row group

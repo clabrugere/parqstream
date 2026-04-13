@@ -17,12 +17,12 @@ pub struct Chunk {
 // continuously sends row group read tasks to the chunk channel, shuffled if needed
 pub fn chunk_feeder(
     chunk_tx: &Sender<Chunk>,
-    row_groups: &[(usize, usize)],
+    row_group_lengths: &[usize],
     chunk_size: usize,
     shuffle: bool,
     seed: Option<u64>,
 ) {
-    let num_groups = row_groups.len();
+    let num_groups = row_group_lengths.len();
     let mut rng = seed.map_or_else(rand::make_rng, SmallRng::seed_from_u64);
     let mut order = (0..num_groups).collect::<Vec<_>>();
     if shuffle {
@@ -42,7 +42,7 @@ pub fn chunk_feeder(
             intra_row_group_offset = 0;
         }
         let row_group_idx = order[row_group_offset];
-        let (_, row_group_length) = row_groups[row_group_idx];
+        let row_group_length = row_group_lengths[row_group_idx];
         let num_rows = chunk_size.min(row_group_length - intra_row_group_offset);
 
         if chunk_tx
