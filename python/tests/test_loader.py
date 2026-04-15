@@ -297,3 +297,26 @@ def test_resume_different_dataset(parquet_path):
     new_loader = DataLoader(ds2, batch_size=4, num_steps=10)
     with pytest.raises(ValueError, match="dataset identifier mismatch"):
         new_loader.load_state_dict(state)
+
+
+def test_state_dict_before_iter_raises(parquet_path):
+    ds = Dataset([parquet_path], columns=["id"])
+    loader = DataLoader(ds, batch_size=4, num_steps=10)
+
+    with pytest.raises(RuntimeError, match="iter"):
+        loader.state_dict()
+
+
+def test_resume_after_full_consumption(parquet_path):
+    # Checkpointing after all batches are exhausted records steps_remaining=0.
+    # Loading that checkpoint and iterating should yield no batches.
+    ds = Dataset([parquet_path], columns=["id"])
+
+    loader = DataLoader(ds, batch_size=4, num_steps=5)
+    _ = list(loader)  # consume all 5 batches
+
+    state = loader.state_dict()
+
+    new_loader = DataLoader(ds, batch_size=4, num_steps=5)
+    new_loader.load_state_dict(state)
+    assert len(list(new_loader)) == 0
