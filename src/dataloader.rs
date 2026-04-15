@@ -246,6 +246,11 @@ impl DataLoader {
         ))
     }
 
+    /// Restore a previously saved checkpoint.
+    ///
+    /// The checkpoint's `steps_remaining` overrides the loader's `num_steps` for
+    /// the resumed iteration; this is intentional so that the run ends at exactly
+    /// the same total number of batches as the original run.
     pub fn load_state_dict(&mut self, checkpoint: Checkpoint) -> PyResult<()> {
         if checkpoint.dataset_identifier != self.dataset.identifier {
             return Err(PyValueError::new_err(format!(
