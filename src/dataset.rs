@@ -1,7 +1,9 @@
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::result::Result as StdResult;
 use std::{fs::File, sync::Arc};
 
+use ahash::AHasher;
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
@@ -16,7 +18,7 @@ use pyo3::prelude::*;
 use crate::error::{Error, Result};
 
 /// Resolve `columns` to their indices in the schema, sorted by schema order, returning an error if any is missing.
-pub fn column_indices(schema: &SchemaRef, columns: &[String]) -> Result<Vec<usize>> {
+fn column_indices(schema: &SchemaRef, columns: &[String]) -> Result<Vec<usize>> {
     let mut indices = columns
         .iter()
         .map(|name| {
@@ -47,22 +49,20 @@ pub struct ParquetFile {
 impl ParquetFile {
     /// Load arrow metadata from a parquet file, returning an error if the file cannot be opened or read.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
         let file = File::open(&path).map_err(|e| Error::OpenFile {
-            path: path.as_ref().to_path_buf(),
+            path: path.clone(),
             source: e,
         })?;
         let arrow_meta =
             ArrowReaderMetadata::load(&file, ArrowReaderOptions::default()).map_err(|e| {
                 Error::ReadParquet {
-                    path: path.as_ref().to_path_buf(),
+                    path: path.clone(),
                     source: e,
                 }
             })?;
 
-        Ok(Self {
-            path: path.as_ref().to_path_buf(),
-            arrow_meta,
-        })
+        Ok(Self { path, arrow_meta })
     }
 
     pub fn parquet_schema(&self) -> &SchemaDescriptor {
@@ -98,20 +98,32 @@ pub struct Dataset {
     pub projection: ProjectionMask,
     pub row_group_index: Vec<RowGroupMeta>,
     pub total_rows: usize,
+    pub identifier: u64,
 }
 
 impl Dataset {
-    /// Construct a single logical dataset from `paths`, while validating that all files share the same schema.
-    pub fn new(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
-        let mut paths = paths.into_iter().enumerate();
-        let mut files = Vec::with_capacity(paths.len());
-        let mut row_group_index = Vec::new();
-        let mut total_rows = 0;
+    fn compute_identifier(
+        paths: impl Iterator<Item = PathBuf>,
+        columns: &[String],
+        num_row_groups: usize,
+        num_rows: usize,
+    ) -> u64 {
+        let mut hasher = AHasher::default();
+        for path in paths {
+            path.hash(&mut hasher);
+        }
+        for column in columns {
+            column.hash(&mut hasher);
+        }
+        num_row_groups.hash(&mut hasher);
+        num_rows.hash(&mut hasher);
+        hasher.finish()
+    }
 
-        // Read first file metadata to determine schema
-        let (_, first_path) = paths.next().ok_or(Error::EmptyPaths)?;
-        let parquet_file = ParquetFile::load(&first_path)?;
-
+    fn build_projection(
+        parquet_file: &ParquetFile,
+        columns: Option<Vec<String>>,
+    ) -> Result<(SchemaRef, ProjectionMask, Vec<String>)> {
         let schema = parquet_file.arrow_schema().clone();
         let columns =
             columns.unwrap_or_else(|| schema.fields().iter().map(|f| f.name().clone()).collect());
@@ -119,18 +131,13 @@ impl Dataset {
         let projected_schema = Arc::new(schema.project(&col_indices)?);
         let projection = ProjectionMask::roots(parquet_file.parquet_schema(), col_indices);
 
-        files.push(parquet_file);
+        Ok((projected_schema, projection, columns))
+    }
 
-        // Process remaining files, validating schema consistency
-        for (_, path) in paths {
-            let parquet_file = ParquetFile::load(&path)?;
-            if parquet_file.arrow_schema().fields() != projected_schema.fields() {
-                return Err(Error::SchemaMismatch { path: path.into() });
-            }
-            files.push(parquet_file);
-        }
+    fn build_row_group_index(files: &[ParquetFile]) -> Result<(Vec<RowGroupMeta>, usize)> {
+        let mut row_group_index = Vec::new();
+        let mut total_rows = 0;
 
-        // Index row groups across all files
         for (file_idx, parquet_file) in files.iter().enumerate() {
             for row_group_idx in 0..parquet_file.num_row_groups() {
                 let num_rows = parquet_file.num_rows(row_group_idx)?;
@@ -144,6 +151,44 @@ impl Dataset {
             }
         }
 
+        Ok((row_group_index, total_rows))
+    }
+
+    /// Construct a single logical dataset from `paths`, while validating that all files share the same schema.
+    pub fn new(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
+        let mut files = Vec::with_capacity(paths.len());
+        let mut paths = paths.into_iter().enumerate();
+
+        // Read first file metadata to determine schema
+        let (_, first_path) = paths.next().ok_or(Error::EmptyPaths)?;
+        let parquet_file = ParquetFile::load(&first_path)?;
+
+        // resolve column names to indices and build projected schema and projection mask
+        let (projected_schema, projection, columns) =
+            Dataset::build_projection(&parquet_file, columns)?;
+
+        files.push(parquet_file);
+
+        // Process remaining files, validating schema consistency
+        for (_, path) in paths {
+            let parquet_file = ParquetFile::load(&path)?;
+            if parquet_file.arrow_schema().fields() != projected_schema.fields() {
+                return Err(Error::SchemaMismatch { path: path.into() });
+            }
+            files.push(parquet_file);
+        }
+
+        // Index row groups across all files
+        let (row_group_index, total_rows) = Dataset::build_row_group_index(&files)?;
+
+        // compute dataset identifier
+        let identifier = Dataset::compute_identifier(
+            files.iter().map(|f| f.path.clone()),
+            &columns,
+            row_group_index.len(),
+            total_rows,
+        );
+
         Ok(Self {
             files,
             columns,
@@ -151,6 +196,7 @@ impl Dataset {
             projection,
             row_group_index,
             total_rows,
+            identifier,
         })
     }
 
@@ -215,6 +261,11 @@ impl Dataset {
     #[getter]
     pub fn num_row_groups(&self) -> usize {
         self.row_group_index.len()
+    }
+
+    #[getter]
+    pub fn identifier(&self) -> u64 {
+        self.identifier
     }
 
     pub fn __len__(&self) -> usize {

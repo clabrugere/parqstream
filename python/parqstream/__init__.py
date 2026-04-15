@@ -92,6 +92,12 @@ class DataLoader:
     def __repr__(self) -> str:
         return repr(self._dataloader)
 
+    def state_dict(self) -> dict[str, Any]:
+        return self._dataloader.state_dict()
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self._dataloader.load_state_dict(state)
+
 
 class Dataset:
     """Dataset distributed over one or more Parquet files only read as needed.

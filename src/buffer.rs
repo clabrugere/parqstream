@@ -5,7 +5,9 @@ use arrow::compute::{concat_batches, take};
 use arrow::record_batch::RecordBatch;
 use crossbeam_channel::Receiver;
 use pyo3::Python;
-use rand::prelude::*;
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
 
 use crate::error::Result;
 
@@ -25,23 +27,48 @@ pub fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<Record
     Ok(RecordBatch::try_new(buffer.schema(), columns)?)
 }
 
+#[derive(Debug, Default)]
+pub struct BufferSnapshot {
+    pub offset: usize,
+    pub refill_count: usize,
+}
+
+#[derive(Debug)]
 pub struct Buffer {
     rx: Receiver<Result<RecordBatch>>,
     shuffle: bool,
     data: Option<RecordBatch>,
     offset: usize,
-    rng: SmallRng,
+    seed: u64,
+    refill_count: usize,
+    initial_offset: usize,
 }
 
 impl Buffer {
-    pub fn new(rx: Receiver<Result<RecordBatch>>, shuffle: bool, seed: Option<u64>) -> Self {
-        let rng = seed.map_or_else(rand::make_rng, SmallRng::seed_from_u64);
+    pub fn new(
+        rx: Receiver<Result<RecordBatch>>,
+        shuffle: bool,
+        seed: u64,
+        refill_count: usize,
+        initial_offset: usize,
+    ) -> Self {
         Self {
             rx,
             shuffle,
             data: None,
             offset: 0,
-            rng,
+            seed,
+            refill_count,
+            initial_offset,
+        }
+    }
+
+    fn maybe_shuffle(&self, batch: RecordBatch) -> Result<RecordBatch> {
+        if self.shuffle {
+            let mut rng = SmallRng::seed_from_u64(self.seed + self.refill_count as u64);
+            shuffle_buffer(&batch, &mut rng)
+        } else {
+            Ok(batch)
         }
     }
 
@@ -60,18 +87,16 @@ impl Buffer {
 
         match py.detach(|| self.rx.recv()) {
             Ok(Ok(next)) => {
-                let next = if self.shuffle {
-                    shuffle_buffer(&next, &mut self.rng)?
-                } else {
-                    next
-                };
+                let next = self.maybe_shuffle(next)?;
                 self.data = Some(match remaining_rows {
                     Some(remaining_rows) => {
                         concat_batches(&next.schema(), &[remaining_rows, next])?
                     }
                     None => next,
                 });
-                self.offset = 0;
+                self.offset = self.initial_offset;
+                self.initial_offset = 0;
+                self.refill_count += 1;
                 Ok(true)
             }
             Ok(Err(e)) => Err(e), // upstream error
@@ -89,5 +114,12 @@ impl Buffer {
         let batch = data.slice(self.offset, length);
         self.offset += length;
         Ok(Some(batch))
+    }
+
+    pub fn snapshot(&self) -> BufferSnapshot {
+        BufferSnapshot {
+            offset: self.offset,
+            refill_count: self.refill_count,
+        }
     }
 }

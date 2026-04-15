@@ -2,10 +2,34 @@ use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
 use crossbeam_channel::{Receiver, Sender};
-use rand::prelude::*;
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 
 use crate::dataset::Dataset;
 use crate::error::Result;
+
+#[derive(Debug)]
+struct EpochCursor {
+    pub epoch: u64,
+    pub row_group_offset: usize,
+    pub intra_row_group_offset: usize,
+}
+
+impl EpochCursor {
+    pub fn advance(&mut self, num_rows: usize, row_group_length: usize) {
+        self.intra_row_group_offset += num_rows;
+        if self.intra_row_group_offset >= row_group_length {
+            self.row_group_offset += 1;
+            self.intra_row_group_offset = 0;
+        }
+    }
+    pub fn new_epoch(&mut self) {
+        self.epoch += 1;
+        self.row_group_offset = 0;
+        self.intra_row_group_offset = 0;
+    }
+}
 
 #[derive(Debug)]
 pub struct Chunk {
@@ -20,46 +44,46 @@ pub fn chunk_feeder(
     row_group_lengths: &[usize],
     chunk_size: usize,
     shuffle: bool,
-    seed: Option<u64>,
+    seed: u64,
+    epoch: u64,
+    row_group_offset: usize,
+    intra_row_group_offset: usize,
 ) {
+    let mut cursor = EpochCursor {
+        epoch,
+        row_group_offset,
+        intra_row_group_offset,
+    };
+
     let num_groups = row_group_lengths.len();
-    let mut rng = seed.map_or_else(rand::make_rng, SmallRng::seed_from_u64);
     let mut order = (0..num_groups).collect::<Vec<_>>();
     if shuffle {
-        order.shuffle(&mut rng);
+        order.shuffle(&mut SmallRng::seed_from_u64(seed + cursor.epoch));
     }
-
-    let mut row_group_offset = 0;
-    let mut intra_row_group_offset = 0;
 
     loop {
         // new epoch , re-shuffle if needed
-        if row_group_offset >= num_groups {
+        if cursor.row_group_offset >= num_groups {
+            cursor.new_epoch();
             if shuffle {
-                order.shuffle(&mut rng);
+                order.shuffle(&mut SmallRng::seed_from_u64(seed + cursor.epoch));
             }
-            row_group_offset = 0;
-            intra_row_group_offset = 0;
         }
-        let row_group_idx = order[row_group_offset];
+        let row_group_idx = order[cursor.row_group_offset];
         let row_group_length = row_group_lengths[row_group_idx];
-        let num_rows = chunk_size.min(row_group_length - intra_row_group_offset);
+        let num_rows = chunk_size.min(row_group_length - cursor.intra_row_group_offset);
 
         if chunk_tx
             .send(Chunk {
                 row_group_idx,
-                start_row: intra_row_group_offset,
+                start_row: cursor.intra_row_group_offset,
                 num_rows,
             })
             .is_err()
         {
             return; // consumer dropped
         }
-        intra_row_group_offset += num_rows;
-        if intra_row_group_offset >= row_group_length {
-            row_group_offset += 1;
-            intra_row_group_offset = 0;
-        }
+        cursor.advance(num_rows, row_group_length);
     }
 }
 

@@ -807,6 +807,7 @@ dependencies = [
 name = "parqstream"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "arrow",
  "crossbeam-channel",
  "parquet",

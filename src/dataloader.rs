@@ -8,9 +8,19 @@ use pyo3::prelude::*;
 
 use crate::batch::Batch;
 use crate::buffer::Buffer;
+use crate::checkpoint::{Checkpoint, Cursor};
 use crate::dataset::Dataset;
 use crate::error::{Error, Result};
 use crate::pipeline::{chunk_feeder, collector, read_feeder, Chunk};
+
+/// Stores the state of a Dataloader, which can be serialized to a Checkpoint for saving and resuming later
+#[derive(Debug, Default)]
+pub struct DataLoaderState {
+    pub buffer: Option<Buffer>,
+    pub steps_remaining: Option<usize>,
+    pub epoch_count: usize,
+    pub rows_within_epoch: usize,
+}
 
 /// Dataloader with prefetching.
 ///
@@ -33,16 +43,19 @@ pub struct DataLoader {
     num_workers: usize,
     prefetch_factor: usize,
     buffer_size: Option<usize>,
-    seed: Option<u64>,
-    // iteration state
-    epoch_counter: usize,
-    buffer: Option<Buffer>,
-    steps_remaining: Option<usize>,
+    seed: u64,
+    state: DataLoaderState,
+    checkpoint: Option<Checkpoint>,
 }
 
 impl DataLoader {
     /// Spawn the feeder and worker threads and return the batch receiver
-    fn spawn_pipeline(&self, seed: Option<u64>) -> Receiver<Result<RecordBatch>> {
+    fn spawn_pipeline(
+        &self,
+        seed: u64,
+        epoch: usize,
+        cursor: &Cursor,
+    ) -> Receiver<Result<RecordBatch>> {
         let dataset = self.dataset.clone();
         let buffer_size = self
             .buffer_size
@@ -63,8 +76,19 @@ impl DataLoader {
         let (buffer_tx, buffer_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
         // chunk feeder sending row group read tasks to workers
+        let row_group_offset = cursor.row_group_offset;
+        let intra_row_group_offset = cursor.intra_row_group_offset;
         thread::spawn(move || {
-            chunk_feeder(&chunk_tx, &row_group_lengths, chunk_size, shuffle, seed);
+            chunk_feeder(
+                &chunk_tx,
+                &row_group_lengths,
+                chunk_size,
+                shuffle,
+                seed,
+                epoch as u64,
+                row_group_offset,
+                intra_row_group_offset,
+            );
         });
 
         // workers read a contiguous chunk from a row group
@@ -110,10 +134,8 @@ impl DataLoader {
         if batch_size == 0 {
             return Err(PyValueError::new_err("batch_size must be > 0"));
         }
-        if let Some(num_steps) = num_steps {
-            if num_steps == 0 {
-                return Err(PyValueError::new_err("num_steps must be > 0"));
-            }
+        if num_steps == Some(0) {
+            return Err(PyValueError::new_err("num_steps must be > 0"));
         }
         if num_workers == 0 {
             return Err(PyValueError::new_err("num_workers must be > 0"));
@@ -121,71 +143,128 @@ impl DataLoader {
         if prefetch_factor == 0 {
             return Err(PyValueError::new_err("prefetch_factor must be > 0"));
         }
-        if let Some(buffer_size) = buffer_size {
-            if buffer_size < batch_size {
-                return Err(PyValueError::new_err("buffer_size must be >= batch_size"));
-            }
+        if buffer_size.is_some_and(|bs| bs < batch_size) {
+            return Err(PyValueError::new_err("buffer_size must be >= batch_size"));
         }
 
         let available_cores = thread::available_parallelism()
             .map_err(|e| Error::ThreadDetermination(e.to_string()))?
             .get();
-        let num_workers = num_workers.min(available_cores).max(1);
 
         Ok(Self {
             dataset: Arc::new(dataset.clone()),
             batch_size,
             num_steps,
-            num_workers,
+            num_workers: num_workers.min(available_cores).max(1),
             prefetch_factor,
             shuffle,
             buffer_size,
-            epoch_counter: 0,
-            buffer: None,
-            steps_remaining: None,
-            seed,
+            seed: seed.unwrap_or_else(rand::random),
+            state: DataLoaderState::default(),
+            checkpoint: None,
         })
     }
 
     /// Start (or restart) the prefetch pipeline and return `self`.
     pub fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        let seed = slf.seed.map(|s| s + slf.epoch_counter as u64);
-        let buffer_rx = slf.spawn_pipeline(seed);
-        slf.buffer = Some(Buffer::new(buffer_rx, slf.shuffle, seed));
-        slf.steps_remaining = slf.num_steps;
-        slf.epoch_counter += 1;
+        // load from checkpoint if exists, otherwise start from the beginning of the dataset with a new seed
+        let (seed, steps_remaining, cursor) = match slf.checkpoint.take() {
+            Some(checkpoint) => (
+                checkpoint.seed,
+                checkpoint.steps_remaining,
+                checkpoint.cursor,
+            ),
+            None => (
+                slf.seed + slf.state.epoch_count as u64,
+                slf.num_steps,
+                Cursor::default(),
+            ),
+        };
+
+        let buffer_rx = slf.spawn_pipeline(seed, slf.state.epoch_count, &cursor);
+        let buffer = Buffer::new(
+            buffer_rx,
+            slf.shuffle,
+            seed,
+            cursor.buffer_consumed,
+            cursor.buffer_offset,
+        );
+
+        // update state for new iteration
+        slf.state.buffer = Some(buffer);
+        slf.state.steps_remaining = steps_remaining;
+        slf.state.rows_within_epoch = 0;
+        slf.state.epoch_count += 1;
+
         slf
     }
 
     /// Return the next `Batch`, or raise `StopIteration` when the pipeline is exhausted.
     pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Batch> {
         let batch_size = slf.batch_size;
-        if slf.steps_remaining == Some(0) {
-            return Err(PyStopIteration::new_err("dataloader consumed"));
-        }
-        let Some(buffer) = slf.buffer.as_mut() else {
-            return Err(PyStopIteration::new_err("dataloader not initialized"));
+        let state = &mut slf.state;
+
+        let Some(buffer) = state.buffer.as_mut() else {
+            return Err(PyRuntimeError::new_err(
+                "iteration not started, call iter(dataloader) first",
+            ));
         };
+        if state.steps_remaining == Some(0) {
+            return Err(PyStopIteration::new_err("DataLoader consumed"));
+        }
         match buffer.take(batch_size, py) {
             Ok(Some(batch)) => {
-                if let Some(steps_remaining) = slf.steps_remaining.as_mut() {
+                if let Some(steps_remaining) = state.steps_remaining.as_mut() {
                     *steps_remaining -= 1;
                 }
+                state.rows_within_epoch += batch.num_rows();
                 Ok(Batch::new(batch))
             }
-            Ok(None) => Err(PyStopIteration::new_err("dataloader consumed")),
+            Ok(None) => Err(PyStopIteration::new_err("DataLoader consumed")),
             Err(e) => Err(PyRuntimeError::new_err(format!("worker error: {e}"))),
         }
     }
 
-    pub fn __len__(&self) -> PyResult<usize> {
-        if let Some(num_steps) = self.num_steps {
-            Ok(num_steps)
-        } else {
-            Err(PyValueError::new_err(
-                "length is undefined for infinite dataloader; set num_steps to a finite value to enable __len__"
-            ))
+    pub fn state_dict(&self) -> PyResult<Checkpoint> {
+        // check if __iter__ has been called at least once
+        if self.state.buffer.is_none() {
+            return Err(PyRuntimeError::new_err(
+                "no state to serialize, call iter(dataloader) first",
+            ));
         }
+        // if a checkpoint is already stored and hasn't been consumed by __iter__, return it directly
+        if let Some(checkpoint) = &self.checkpoint {
+            return Ok(checkpoint.clone());
+        }
+
+        Ok(Checkpoint::from_state(
+            &self.state,
+            self.shuffle,
+            self.seed,
+            self.dataset.identifier,
+            &self.dataset.row_group_index,
+        ))
+    }
+
+    pub fn load_state_dict(&mut self, checkpoint: Checkpoint) -> PyResult<()> {
+        if checkpoint.dataset_identifier != self.dataset.identifier {
+            return Err(PyValueError::new_err(format!(
+                "dataset identifier mismatch: checkpoint={:#x}, current={:#x}",
+                checkpoint.dataset_identifier, self.dataset.identifier
+            )));
+        }
+        self.state.epoch_count = checkpoint.epoch;
+        self.state.steps_remaining = checkpoint.steps_remaining;
+        self.checkpoint = Some(checkpoint);
+        Ok(())
+    }
+
+    pub fn __len__(&self) -> PyResult<usize> {
+        self.num_steps.ok_or_else(|| {
+            PyValueError::new_err(
+                "length is undefined for infinite DataLoader; set num_steps to a finite value to enable __len__",
+            )
+        })
     }
 
     pub fn __repr__(&self) -> String {
