@@ -39,6 +39,7 @@ pub struct Chunk {
 }
 
 // continuously sends row group read tasks to the chunk channel, shuffled if needed
+#[allow(clippy::too_many_arguments)]
 pub fn chunk_feeder(
     chunk_tx: &Sender<Chunk>,
     row_group_lengths: &[usize],

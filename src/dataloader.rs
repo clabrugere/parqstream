@@ -121,6 +121,7 @@ impl DataLoader {
         buffer_size = None,
         seed = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     pub fn py_new(
         dataset: &Dataset,
         batch_size: usize,
