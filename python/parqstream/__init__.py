@@ -6,8 +6,7 @@ from typing import Any, Callable
 import numpy as np
 import pyarrow as pa
 
-from parqstream._parqstream import Checkpoint
-from parqstream._parqstream import Column
+from parqstream._parqstream import Checkpoint, Column
 from parqstream._parqstream import DataLoader as _RustDataLoader
 from parqstream._parqstream import Dataset as _RustDataset
 

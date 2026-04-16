@@ -122,15 +122,41 @@ impl Checkpoint {
             .map_err(|_| PyValueError::new_err("'cursor' must be a dict"))?;
 
         Ok(Self {
-            seed: dict.get_item("seed")?.ok_or_else(|| PyValueError::new_err("missing key 'seed'"))?.extract::<u64>()?,
-            dataset_identifier: dict.get_item("dataset_identifier")?.ok_or_else(|| PyValueError::new_err("missing key 'dataset_identifier'"))?.extract::<u64>()?,
-            epoch: dict.get_item("epoch")?.ok_or_else(|| PyValueError::new_err("missing key 'epoch'"))?.extract::<usize>()?,
-            steps_remaining: dict.get_item("steps_remaining")?.ok_or_else(|| PyValueError::new_err("missing key 'steps_remaining'"))?.extract::<Option<usize>>()?,
+            seed: dict
+                .get_item("seed")?
+                .ok_or_else(|| PyValueError::new_err("missing key 'seed'"))?
+                .extract::<u64>()?,
+            dataset_identifier: dict
+                .get_item("dataset_identifier")?
+                .ok_or_else(|| PyValueError::new_err("missing key 'dataset_identifier'"))?
+                .extract::<u64>()?,
+            epoch: dict
+                .get_item("epoch")?
+                .ok_or_else(|| PyValueError::new_err("missing key 'epoch'"))?
+                .extract::<usize>()?,
+            steps_remaining: dict
+                .get_item("steps_remaining")?
+                .ok_or_else(|| PyValueError::new_err("missing key 'steps_remaining'"))?
+                .extract::<Option<usize>>()?,
             cursor: Cursor {
-                row_group_offset: cursor_dict.get_item("row_group_offset")?.ok_or_else(|| PyValueError::new_err("missing key 'cursor.row_group_offset'"))?.extract::<usize>()?,
-                intra_row_group_offset: cursor_dict.get_item("intra_row_group_offset")?.ok_or_else(|| PyValueError::new_err("missing key 'cursor.intra_row_group_offset'"))?.extract::<usize>()?,
-                buffer_consumed: cursor_dict.get_item("buffer_consumed")?.ok_or_else(|| PyValueError::new_err("missing key 'cursor.buffer_consumed'"))?.extract::<usize>()?,
-                buffer_offset: cursor_dict.get_item("buffer_offset")?.ok_or_else(|| PyValueError::new_err("missing key 'cursor.buffer_offset'"))?.extract::<usize>()?,
+                row_group_offset: cursor_dict
+                    .get_item("row_group_offset")?
+                    .ok_or_else(|| PyValueError::new_err("missing key 'cursor.row_group_offset'"))?
+                    .extract::<usize>()?,
+                intra_row_group_offset: cursor_dict
+                    .get_item("intra_row_group_offset")?
+                    .ok_or_else(|| {
+                        PyValueError::new_err("missing key 'cursor.intra_row_group_offset'")
+                    })?
+                    .extract::<usize>()?,
+                buffer_consumed: cursor_dict
+                    .get_item("buffer_consumed")?
+                    .ok_or_else(|| PyValueError::new_err("missing key 'cursor.buffer_consumed'"))?
+                    .extract::<usize>()?,
+                buffer_offset: cursor_dict
+                    .get_item("buffer_offset")?
+                    .ok_or_else(|| PyValueError::new_err("missing key 'cursor.buffer_offset'"))?
+                    .extract::<usize>()?,
             },
         })
     }

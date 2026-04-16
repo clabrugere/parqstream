@@ -170,7 +170,11 @@ impl DataLoader {
     pub fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         // load from checkpoint if exists, otherwise start from the beginning of the dataset with a new seed
         let (seed, steps_remaining, cursor) = match slf.checkpoint.take() {
-            Some(checkpoint) => (checkpoint.seed, checkpoint.steps_remaining, checkpoint.cursor),
+            Some(checkpoint) => (
+                checkpoint.seed,
+                checkpoint.steps_remaining,
+                checkpoint.cursor,
+            ),
             None => (
                 slf.seed + slf.state.epoch_count as u64,
                 slf.num_steps,
