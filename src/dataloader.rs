@@ -18,7 +18,7 @@ use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk};
 pub struct DataLoaderState {
     pub buffer: Option<Buffer>,
     pub steps_remaining: Option<usize>,
-    pub epoch_count: usize,
+    pub epoch: usize,
     pub rows_within_epoch: usize,
 }
 
@@ -51,7 +51,7 @@ pub struct DataLoader {
 impl DataLoader {
     /// Per-epoch seed: varies each epoch so row-group and buffer shuffles differ across epochs.
     fn epoch_seed(&self) -> u64 {
-        self.seed + self.state.epoch_count as u64
+        self.seed + self.state.epoch as u64
     }
 
     /// Spawn the feeder and worker threads and return the batch receiver
@@ -169,7 +169,7 @@ impl DataLoader {
 
     /// Start (or restart) the prefetch pipeline and return `self`.
     pub fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf.state.epoch_count += 1;
+        slf.state.epoch += 1;
 
         // On checkpoint resume, use the saved seed/cursor/steps_remaining so the run continues
         // from exactly where it stopped. Otherwise derive a fresh per-epoch seed.
@@ -258,7 +258,7 @@ impl DataLoader {
                 checkpoint.dataset_identifier, self.dataset.identifier
             )));
         }
-        self.state.epoch_count = checkpoint.epoch;
+        self.state.epoch = checkpoint.epoch;
         self.checkpoint = Some(checkpoint);
         Ok(())
     }

@@ -124,7 +124,7 @@ impl Checkpoint {
         Self {
             seed,
             dataset_identifier,
-            epoch: state.epoch_count,
+            epoch: state.epoch,
             steps_remaining: state.steps_remaining,
             cursor,
         }
