@@ -48,7 +48,7 @@ pub struct Buffer {
     /// Applied once on the first refill to skip into a partially-consumed buffer (checkpoint resume).
     resume_offset: usize,
     /// Rows prepended from the previous fill; snapshotted so checkpoint can correct its cursor.
-    current_tail_size: usize,
+    tail_size: usize,
 }
 
 impl Buffer {
@@ -67,7 +67,7 @@ impl Buffer {
             seed,
             seed_offset,
             resume_offset,
-            current_tail_size: 0,
+            tail_size: 0,
         }
     }
 
@@ -99,7 +99,7 @@ impl Buffer {
             Ok(Ok(next)) => {
                 let next = self.maybe_shuffle(next)?;
                 // Record tail size before stitching so checkpoint.rs can locate the fresh-data boundary.
-                self.current_tail_size = remaining_rows.as_ref().map_or(0, RecordBatch::num_rows);
+                self.tail_size = remaining_rows.as_ref().map_or(0, RecordBatch::num_rows);
                 self.data = Some(match remaining_rows {
                     Some(remaining_rows) => {
                         concat_batches(&next.schema(), &[remaining_rows, next])?
@@ -134,7 +134,7 @@ impl Buffer {
         BufferSnapshot {
             offset: self.offset,
             seed_offset: self.seed_offset,
-            tail_size: self.current_tail_size,
+            tail_size: self.tail_size,
         }
     }
 }
