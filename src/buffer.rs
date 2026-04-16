@@ -46,7 +46,7 @@ pub struct Buffer {
     /// Incremented after each refill; the nth fill is shuffled with `SmallRng(seed + seed_offset_at_that_fill)`.
     seed_offset: usize,
     /// Applied once on the first refill to skip into a partially-consumed buffer (checkpoint resume).
-    initial_offset: usize,
+    resume_offset: usize,
     /// Rows prepended from the previous fill; snapshotted so checkpoint can correct its cursor.
     current_tail_size: usize,
 }
@@ -57,7 +57,7 @@ impl Buffer {
         shuffle: bool,
         seed: u64,
         seed_offset: usize,
-        initial_offset: usize,
+        resume_offset: usize,
     ) -> Self {
         Self {
             prefetch_rx,
@@ -66,7 +66,7 @@ impl Buffer {
             offset: 0,
             seed,
             seed_offset,
-            initial_offset,
+            resume_offset,
             current_tail_size: 0,
         }
     }
@@ -106,10 +106,10 @@ impl Buffer {
                     }
                     None => next,
                 });
-                // initial_offset is non-zero only on the first refill after a checkpoint restore;
+                // resume_offset is non-zero only on the first refill after a checkpoint restore;
                 // it skips past the tail portion that cannot be reconstructed on resume.
-                self.offset = self.initial_offset;
-                self.initial_offset = 0;
+                self.offset = self.resume_offset;
+                self.resume_offset = 0;
                 self.seed_offset += 1;
                 Ok(true)
             }

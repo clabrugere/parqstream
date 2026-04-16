@@ -46,7 +46,7 @@ impl Checkpoint {
         let total_rows = row_group_index.iter().map(|rg| rg.num_rows).sum::<usize>();
 
         // On resume, data=None so no tail is stitched. Shift the feeder to the fresh-epoch
-        // start and correct buffer_offset by -tail_size so initial_offset lands at the right spot.
+        // start and correct buffer_offset by -tail_size so resume_offset lands at the right spot.
         // If buffer_offset < tail_size (cursor is mid-tail), fall back to the tail-start position.
         let (epoch_rows, corrected_buffer_offset) = if buffer_offset >= buffer_tail_size {
             (
