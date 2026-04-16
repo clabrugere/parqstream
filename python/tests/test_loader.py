@@ -286,6 +286,27 @@ def test_resume_from_checkpoint(parquet_path, shuffle):
     assert np.array_equal(np.concatenate([first, second]), reference)
 
 
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_resume_from_checkpoint_multiple_epoch(parquet_path, shuffle):
+    num_steps = 40  # > one epoch (≈19.5 steps), forces internal wrap in chunk_feeder
+    batch_size = 512
+    seed = 42
+    ds = Dataset([parquet_path], columns=["id"])
+
+    ref = DataLoader(ds, batch_size=batch_size, num_steps=num_steps, shuffle=shuffle, seed=seed)
+    reference = np.concatenate([b["id"] for b in ref])
+
+    loader = DataLoader(ds, batch_size=batch_size, num_steps=num_steps, shuffle=shuffle, seed=seed)
+    it = iter(loader)
+    first = np.concatenate([next(it)["id"] for _ in range(22)])  # past 1 full epoch
+
+    new_loader = DataLoader(ds, batch_size=batch_size, num_steps=num_steps, shuffle=shuffle, seed=seed)
+    new_loader.load_state_dict(loader.state_dict())
+    second = np.concatenate([b["id"] for b in new_loader])
+
+    assert np.array_equal(np.concatenate([first, second]), reference)
+
+
 def test_resume_different_dataset(parquet_path):
     ds1 = Dataset([parquet_path], columns=["id"])
     ds2 = Dataset([parquet_path], columns=["f1"])

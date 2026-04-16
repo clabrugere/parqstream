@@ -30,7 +30,10 @@ pub fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<Record
 #[derive(Debug, Default)]
 pub struct BufferSnapshot {
     pub offset: usize,
-    pub refill_count: usize,
+    /// Number of refills that have occurred; used to derive the shuffle seed for the next fill.
+    pub seed_offset: usize,
+    /// Rows stitched from the previous fill into the current one (see `Buffer::refill`).
+    pub tail_size: usize,
 }
 
 #[derive(Debug)]
@@ -40,8 +43,12 @@ pub struct Buffer {
     data: Option<RecordBatch>,
     offset: usize,
     seed: u64,
-    refill_count: usize,
+    /// Incremented after each refill; the nth fill is shuffled with `SmallRng(seed + seed_offset_at_that_fill)`.
+    seed_offset: usize,
+    /// Applied once on the first refill to skip into a partially-consumed buffer (checkpoint resume).
     initial_offset: usize,
+    /// Rows prepended from the previous fill; snapshotted so checkpoint can correct its cursor.
+    current_tail_size: usize,
 }
 
 impl Buffer {
@@ -49,7 +56,7 @@ impl Buffer {
         rx: Receiver<Result<RecordBatch>>,
         shuffle: bool,
         seed: u64,
-        refill_count: usize,
+        seed_offset: usize,
         initial_offset: usize,
     ) -> Self {
         Self {
@@ -58,14 +65,15 @@ impl Buffer {
             data: None,
             offset: 0,
             seed,
-            refill_count,
+            seed_offset,
             initial_offset,
+            current_tail_size: 0,
         }
     }
 
     fn maybe_shuffle(&self, batch: RecordBatch) -> Result<RecordBatch> {
         if self.shuffle {
-            let mut rng = SmallRng::seed_from_u64(self.seed + self.refill_count as u64);
+            let mut rng = SmallRng::seed_from_u64(self.seed + self.seed_offset as u64);
             shuffle_buffer(&batch, &mut rng)
         } else {
             Ok(batch)
@@ -78,7 +86,9 @@ impl Buffer {
             .is_none_or(|batch| self.offset + num_rows > batch.num_rows())
     }
 
-    // fetch the next buffer from the channel, stitching any remaining rows from the current buffer
+    // Fetch the next fill from the channel. Any unconsumed rows from the current buffer are
+    // prepended (stitched) so batches never straddle a fill boundary with a gap. The stitched
+    // tail retains its previous shuffle; only the fresh data is shuffled with the new seed.
     fn refill(&mut self, py: Python<'_>) -> Result<bool> {
         let remaining_rows = self.data.as_ref().and_then(|data| {
             (self.offset < data.num_rows())
@@ -88,15 +98,19 @@ impl Buffer {
         match py.detach(|| self.rx.recv()) {
             Ok(Ok(next)) => {
                 let next = self.maybe_shuffle(next)?;
+                // Record tail size before stitching so checkpoint.rs can locate the fresh-data boundary.
+                self.current_tail_size = remaining_rows.as_ref().map_or(0, RecordBatch::num_rows);
                 self.data = Some(match remaining_rows {
                     Some(remaining_rows) => {
                         concat_batches(&next.schema(), &[remaining_rows, next])?
                     }
                     None => next,
                 });
+                // initial_offset is non-zero only on the first refill after a checkpoint restore;
+                // it skips past the tail portion that cannot be reconstructed on resume.
                 self.offset = self.initial_offset;
                 self.initial_offset = 0;
-                self.refill_count += 1;
+                self.seed_offset += 1;
                 Ok(true)
             }
             Ok(Err(e)) => Err(e), // upstream error
@@ -119,7 +133,8 @@ impl Buffer {
     pub fn snapshot(&self) -> BufferSnapshot {
         BufferSnapshot {
             offset: self.offset,
-            refill_count: self.refill_count,
+            seed_offset: self.seed_offset,
+            tail_size: self.current_tail_size,
         }
     }
 }

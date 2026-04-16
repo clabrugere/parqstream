@@ -9,9 +9,10 @@ use rand::SeedableRng;
 use crate::dataset::Dataset;
 use crate::error::Result;
 
+#[allow(clippy::struct_field_names)]
 #[derive(Debug)]
 struct EpochCursor {
-    pub epoch: u64,
+    pub epoch_offset: usize,
     pub row_group_offset: usize,
     pub intra_row_group_offset: usize,
 }
@@ -25,7 +26,7 @@ impl EpochCursor {
         }
     }
     pub fn new_epoch(&mut self) {
-        self.epoch += 1;
+        self.epoch_offset += 1;
         self.row_group_offset = 0;
         self.intra_row_group_offset = 0;
     }
@@ -46,28 +47,36 @@ pub fn chunk_feeder(
     chunk_size: usize,
     shuffle: bool,
     seed: u64,
-    epoch: u64,
+    epoch_offset: usize,
     row_group_offset: usize,
     intra_row_group_offset: usize,
 ) {
     let mut cursor = EpochCursor {
-        epoch,
+        epoch_offset,
         row_group_offset,
         intra_row_group_offset,
     };
 
     let num_groups = row_group_lengths.len();
+    // Row group visit order for the current epoch. Shuffle seed = seed + epoch_offset so
+    // each epoch gets an independent, deterministic order (matches resolve_cursor in checkpoint.rs).
     let mut order = (0..num_groups).collect::<Vec<_>>();
     if shuffle {
-        order.shuffle(&mut SmallRng::seed_from_u64(seed + cursor.epoch));
+        order.shuffle(&mut SmallRng::seed_from_u64(
+            seed + cursor.epoch_offset as u64,
+        ));
     }
 
     loop {
-        // new epoch , re-shuffle if needed
         if cursor.row_group_offset >= num_groups {
             cursor.new_epoch();
             if shuffle {
-                order.shuffle(&mut SmallRng::seed_from_u64(seed + cursor.epoch));
+                // Reset to identity before shuffling: re-shuffling a non-identity slice would
+                // make epoch N's order depend on epoch N-1's, breaking checkpoint resume.
+                order = (0..num_groups).collect();
+                order.shuffle(&mut SmallRng::seed_from_u64(
+                    seed + cursor.epoch_offset as u64,
+                ));
             }
         }
         let row_group_idx = order[cursor.row_group_offset];

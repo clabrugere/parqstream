@@ -49,13 +49,13 @@ pub struct DataLoader {
 }
 
 impl DataLoader {
+    /// Per-epoch seed: varies each epoch so row-group and buffer shuffles differ across epochs.
+    fn epoch_seed(&self) -> u64 {
+        self.seed + self.state.epoch_count as u64
+    }
+
     /// Spawn the feeder and worker threads and return the batch receiver
-    fn spawn_pipeline(
-        &self,
-        seed: u64,
-        epoch: usize,
-        cursor: &Cursor,
-    ) -> Receiver<Result<RecordBatch>> {
+    fn spawn_pipeline(&self, seed: u64, cursor: &Cursor) -> Receiver<Result<RecordBatch>> {
         let dataset = self.dataset.clone();
         let buffer_size = self
             .buffer_size
@@ -76,6 +76,7 @@ impl DataLoader {
         let (buffer_tx, buffer_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
         // chunk feeder sending row group read tasks to workers
+        let epoch_offset = cursor.epoch_offset;
         let row_group_offset = cursor.row_group_offset;
         let intra_row_group_offset = cursor.intra_row_group_offset;
         thread::spawn(move || {
@@ -85,7 +86,7 @@ impl DataLoader {
                 chunk_size,
                 shuffle,
                 seed,
-                epoch as u64,
+                epoch_offset,
                 row_group_offset,
                 intra_row_group_offset,
             );
@@ -168,7 +169,10 @@ impl DataLoader {
 
     /// Start (or restart) the prefetch pipeline and return `self`.
     pub fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        // load from checkpoint if exists, otherwise start from the beginning of the dataset with a new seed
+        slf.state.epoch_count += 1;
+
+        // On checkpoint resume, use the saved seed/cursor/steps_remaining so the run continues
+        // from exactly where it stopped. Otherwise derive a fresh per-epoch seed.
         let (seed, steps_remaining, cursor) = match slf.checkpoint.take() {
             Some(checkpoint) => (
                 checkpoint.seed,
@@ -176,18 +180,18 @@ impl DataLoader {
                 checkpoint.cursor,
             ),
             None => (
-                slf.seed + slf.state.epoch_count as u64,
+                slf.epoch_seed(),
                 slf.num_steps,
                 Cursor::default(),
             ),
         };
 
-        let buffer_rx = slf.spawn_pipeline(seed, slf.state.epoch_count, &cursor);
+        let buffer_rx = slf.spawn_pipeline(seed, &cursor);
         let buffer = Buffer::new(
             buffer_rx,
             slf.shuffle,
             seed,
-            cursor.buffer_consumed,
+            cursor.buffer_seed_offset,
             cursor.buffer_offset,
         );
 
@@ -195,7 +199,6 @@ impl DataLoader {
         slf.state.buffer = Some(buffer);
         slf.state.steps_remaining = steps_remaining;
         slf.state.rows_within_epoch = 0;
-        slf.state.epoch_count += 1;
 
         slf
     }
@@ -241,7 +244,7 @@ impl DataLoader {
         Ok(Checkpoint::from_state(
             &self.state,
             self.shuffle,
-            self.seed,
+            self.epoch_seed(),
             self.dataset.identifier,
             &self.dataset.row_group_index,
         ))
