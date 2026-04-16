@@ -265,21 +265,21 @@ def test_collate_fn_torch(parquet_path):
         assert isinstance(batch["label"], torch.Tensor)
 
 
-@pytest.mark.parametrize("shuffle", [True, False])
+@pytest.mark.parametrize("shuffle", [False, True])
 def test_resume_from_checkpoint(parquet_path, shuffle):
     seed = 42
     ds = Dataset([parquet_path], columns=["id"])
 
     # complete uninterrupted run used as reference
-    ref = DataLoader(ds, batch_size=4, num_steps=10, shuffle=shuffle, seed=seed)
+    ref = DataLoader(ds, batch_size=512, num_steps=10, shuffle=shuffle, seed=seed)
     reference = np.concatenate([b["id"] for b in ref])
 
     # interrupted run: 3 steps, checkpoint, resume
-    loader = DataLoader(ds, batch_size=4, num_steps=10, shuffle=shuffle, seed=seed)
+    loader = DataLoader(ds, batch_size=512, num_steps=10, shuffle=shuffle, seed=seed)
     it = iter(loader)
     first = np.concatenate([next(it)["id"] for _ in range(3)])
 
-    new_loader = DataLoader(ds, batch_size=4, num_steps=10, shuffle=shuffle, seed=seed)
+    new_loader = DataLoader(ds, batch_size=512, num_steps=10, shuffle=shuffle, seed=seed)
     new_loader.load_state_dict(loader.state_dict())
     second = np.concatenate([b["id"] for b in new_loader])
 
@@ -290,18 +290,18 @@ def test_resume_different_dataset(parquet_path):
     ds1 = Dataset([parquet_path], columns=["id"])
     ds2 = Dataset([parquet_path], columns=["f1"])
 
-    loader = DataLoader(ds1, batch_size=4, num_steps=10)
+    loader = DataLoader(ds1, batch_size=512, num_steps=10)
     _ = next(iter(loader))
     state = loader.state_dict()
 
-    new_loader = DataLoader(ds2, batch_size=4, num_steps=10)
+    new_loader = DataLoader(ds2, batch_size=512, num_steps=10)
     with pytest.raises(ValueError, match="dataset identifier mismatch"):
         new_loader.load_state_dict(state)
 
 
 def test_state_dict_before_iter_raises(parquet_path):
     ds = Dataset([parquet_path], columns=["id"])
-    loader = DataLoader(ds, batch_size=4, num_steps=10)
+    loader = DataLoader(ds, batch_size=512, num_steps=10)
 
     with pytest.raises(RuntimeError, match="iter"):
         loader.state_dict()
@@ -312,11 +312,11 @@ def test_resume_after_full_consumption(parquet_path):
     # Loading that checkpoint and iterating should yield no batches.
     ds = Dataset([parquet_path], columns=["id"])
 
-    loader = DataLoader(ds, batch_size=4, num_steps=5)
+    loader = DataLoader(ds, batch_size=128, num_steps=5)
     _ = list(loader)  # consume all 5 batches
 
     state = loader.state_dict()
 
-    new_loader = DataLoader(ds, batch_size=4, num_steps=5)
+    new_loader = DataLoader(ds, batch_size=128, num_steps=5)
     new_loader.load_state_dict(state)
     assert len(list(new_loader)) == 0

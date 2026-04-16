@@ -170,11 +170,7 @@ impl DataLoader {
     pub fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         // load from checkpoint if exists, otherwise start from the beginning of the dataset with a new seed
         let (seed, steps_remaining, cursor) = match slf.checkpoint.take() {
-            Some(checkpoint) => (
-                checkpoint.seed,
-                checkpoint.steps_remaining,
-                checkpoint.cursor,
-            ),
+            Some(checkpoint) => (checkpoint.seed, checkpoint.steps_remaining, checkpoint.cursor),
             None => (
                 slf.seed + slf.state.epoch_count as u64,
                 slf.num_steps,
@@ -226,7 +222,7 @@ impl DataLoader {
         }
     }
 
-    pub fn state_dict(&self) -> PyResult<Checkpoint> {
+    pub fn checkpoint(&self) -> PyResult<Checkpoint> {
         // check if __iter__ has been called at least once
         if self.state.buffer.is_none() {
             return Err(PyRuntimeError::new_err(
@@ -252,7 +248,7 @@ impl DataLoader {
     /// The checkpoint's `steps_remaining` overrides the loader's `num_steps` for
     /// the resumed iteration; this is intentional so that the run ends at exactly
     /// the same total number of batches as the original run.
-    pub fn load_state_dict(&mut self, checkpoint: Checkpoint) -> PyResult<()> {
+    pub fn load_checkpoint(&mut self, checkpoint: Checkpoint) -> PyResult<()> {
         if checkpoint.dataset_identifier != self.dataset.identifier {
             return Err(PyValueError::new_err(format!(
                 "dataset identifier mismatch: checkpoint={:#x}, current={:#x}",
@@ -260,7 +256,6 @@ impl DataLoader {
             )));
         }
         self.state.epoch_count = checkpoint.epoch;
-        self.state.steps_remaining = checkpoint.steps_remaining;
         self.checkpoint = Some(checkpoint);
         Ok(())
     }

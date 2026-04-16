@@ -26,6 +26,8 @@ The batch channel has capacity `prefetch_factor`, so the next batch can be prepa
 
 Columns are transferred to Python via Arrow PyCapsule — zero-copy for dense numeric columns, one copy for nullable or string columns.
 
+**`Checkpoint`** — opaque object returned by `DataLoader.checkpoint()` that captures the exact iteration position (epoch, row-group offset, buffer offset, steps remaining). Supports `to_dict()` / `from_dict()` for serialization.
+
 ## Usage
 
 ```python
@@ -66,6 +68,46 @@ loader = DataLoader(ds, batch_size=256, collate_fn=collate_fn)
 for batch in loader:
     a = batch["a"]  # torch.Tensor
     b = batch["b"]
+```
+
+### Checkpointing
+
+Call `checkpoint()` at any point during iteration to capture the exact position in the dataset, then pass it to `load_checkpoint()` on a new loader to resume:
+
+```python
+from parqstream import Dataset, DataLoader
+
+ds = Dataset(["part.parquet"])
+loader = DataLoader(ds, batch_size=256, num_steps=1000, shuffle=True, seed=42)
+
+for i, batch in enumerate(loader):
+    train(batch)
+    if i == 499:
+        cp = loader.checkpoint()
+        break
+
+# resume from step 500
+new_loader = DataLoader(ds, batch_size=256, num_steps=1000, shuffle=True, seed=42)
+new_loader.load_checkpoint(cp)
+for batch in new_loader:
+    train(batch)
+```
+
+`state_dict()` and `load_state_dict()` are convenience wrappers that convert the checkpoint to and from a plain Python dict, suitable for saving alongside a model checkpoint:
+
+```python
+import torch
+
+state = {
+    "model": model.state_dict(),
+    "loader": loader.state_dict(),
+}
+torch.save(state, "checkpoint.pt")
+
+# restore
+state = torch.load("checkpoint.pt")
+model.load_state_dict(state["model"])
+loader.load_state_dict(state["loader"])
 ```
 
 ## Local development
@@ -138,5 +180,4 @@ maturin build --release --target x86_64-unknown-linux-gnu --zig
 
 * Support reading from remote storages
 * Support distributed training
-* State serialization for recovery
 * Parallel file validation and global index creation

@@ -1,4 +1,6 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyType};
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -88,5 +90,60 @@ impl Checkpoint {
             steps_remaining,
             cursor,
         }
+    }
+}
+
+#[pymethods]
+impl Checkpoint {
+    pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let cursor = PyDict::new(py);
+        cursor.set_item("row_group_offset", self.cursor.row_group_offset)?;
+        cursor.set_item("intra_row_group_offset", self.cursor.intra_row_group_offset)?;
+        cursor.set_item("buffer_consumed", self.cursor.buffer_consumed)?;
+        cursor.set_item("buffer_offset", self.cursor.buffer_offset)?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("seed", self.seed)?;
+        dict.set_item("dataset_identifier", self.dataset_identifier)?;
+        dict.set_item("epoch", self.epoch)?;
+        dict.set_item("steps_remaining", self.steps_remaining)?;
+        dict.set_item("cursor", cursor)?;
+
+        Ok(dict)
+    }
+
+    #[classmethod]
+    pub fn from_dict(_cls: &Bound<'_, PyType>, dict: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let cursor_obj = dict
+            .get_item("cursor")?
+            .ok_or_else(|| PyValueError::new_err("missing key 'cursor'"))?;
+        let cursor_dict = cursor_obj
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("'cursor' must be a dict"))?;
+
+        Ok(Self {
+            seed: dict.get_item("seed")?.ok_or_else(|| PyValueError::new_err("missing key 'seed'"))?.extract::<u64>()?,
+            dataset_identifier: dict.get_item("dataset_identifier")?.ok_or_else(|| PyValueError::new_err("missing key 'dataset_identifier'"))?.extract::<u64>()?,
+            epoch: dict.get_item("epoch")?.ok_or_else(|| PyValueError::new_err("missing key 'epoch'"))?.extract::<usize>()?,
+            steps_remaining: dict.get_item("steps_remaining")?.ok_or_else(|| PyValueError::new_err("missing key 'steps_remaining'"))?.extract::<Option<usize>>()?,
+            cursor: Cursor {
+                row_group_offset: cursor_dict.get_item("row_group_offset")?.ok_or_else(|| PyValueError::new_err("missing key 'cursor.row_group_offset'"))?.extract::<usize>()?,
+                intra_row_group_offset: cursor_dict.get_item("intra_row_group_offset")?.ok_or_else(|| PyValueError::new_err("missing key 'cursor.intra_row_group_offset'"))?.extract::<usize>()?,
+                buffer_consumed: cursor_dict.get_item("buffer_consumed")?.ok_or_else(|| PyValueError::new_err("missing key 'cursor.buffer_consumed'"))?.extract::<usize>()?,
+                buffer_offset: cursor_dict.get_item("buffer_offset")?.ok_or_else(|| PyValueError::new_err("missing key 'cursor.buffer_offset'"))?.extract::<usize>()?,
+            },
+        })
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "Checkpoint(epoch={}, steps_remaining={:?}, cursor={{row_group_offset={}, intra_row_group_offset={}, buffer_consumed={}, buffer_offset={}}})",
+            self.epoch,
+            self.steps_remaining,
+            self.cursor.row_group_offset,
+            self.cursor.intra_row_group_offset,
+            self.cursor.buffer_consumed,
+            self.cursor.buffer_offset,
+        )
     }
 }
