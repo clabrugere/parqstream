@@ -106,10 +106,10 @@ impl Checkpoint {
             .as_ref()
             .map_or(BufferSnapshot::default(), Buffer::snapshot);
 
-        // rows_within_epoch counts rows delivered to Python; subtracting the current buffer
+        // rows_yielded counts rows delivered to Python; subtracting the current buffer
         // read position gives the total rows that had been fed into the pipeline before the
         // current buffer fill started.
-        let rows_at_buffer_start = state.rows_within_epoch - buffer_snapshot.offset;
+        let rows_at_buffer_start = state.rows_yielded - buffer_snapshot.offset;
 
         let cursor = Self::resolve_cursor(
             rows_at_buffer_start,

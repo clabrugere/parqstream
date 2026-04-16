@@ -19,7 +19,7 @@ pub struct DataLoaderState {
     pub buffer: Option<Buffer>,
     pub steps_remaining: Option<usize>,
     pub epoch: usize,
-    pub rows_within_epoch: usize,
+    pub rows_yielded: usize,
 }
 
 /// Dataloader with prefetching.
@@ -194,7 +194,7 @@ impl DataLoader {
         // update state for new iteration
         slf.state.buffer = Some(buffer);
         slf.state.steps_remaining = steps_remaining;
-        slf.state.rows_within_epoch = 0;
+        slf.state.rows_yielded = 0;
 
         slf
     }
@@ -217,7 +217,7 @@ impl DataLoader {
                 if let Some(steps_remaining) = state.steps_remaining.as_mut() {
                     *steps_remaining -= 1;
                 }
-                state.rows_within_epoch += batch.num_rows();
+                state.rows_yielded += batch.num_rows();
                 Ok(Batch::new(batch))
             }
             Ok(None) => Err(PyStopIteration::new_err("DataLoader consumed")),
