@@ -41,7 +41,7 @@ pub struct Chunk {
 
 // continuously sends row group read tasks to the chunk channel, shuffled if needed
 #[allow(clippy::too_many_arguments)]
-pub fn chunk_feeder(
+pub fn chunk_dispatcher(
     chunk_tx: &Sender<Chunk>,
     row_group_lengths: &[usize],
     chunk_size: usize,
@@ -98,9 +98,9 @@ pub fn chunk_feeder(
 }
 
 // reads chunks received from the chunk channel, gather rows and sends record batches to the batch channel
-pub fn read_feeder(
+pub fn chunk_reader(
     chunk_rx: &Receiver<Chunk>,
-    data_tx: &Sender<Result<RecordBatch>>,
+    batch_tx: &Sender<Result<RecordBatch>>,
     dataset: &Dataset,
 ) {
     for Chunk {
@@ -112,12 +112,12 @@ pub fn read_feeder(
         let meta = &dataset.row_group_index[row_group_idx];
         match dataset.read_row_group_range(meta.file_idx, meta.row_group_idx, start_row, num_rows) {
             Ok(chunk_data) => {
-                if data_tx.send(Ok(chunk_data)).is_err() {
+                if batch_tx.send(Ok(chunk_data)).is_err() {
                     return; // consumer dropped
                 }
             }
             Err(e) => {
-                let _ = data_tx.send(Err(e));
+                let _ = batch_tx.send(Err(e));
                 return; // upstream error
             }
         }
@@ -125,9 +125,9 @@ pub fn read_feeder(
 }
 
 // continuously collects chunks until > buffer_size rows, concatenates and sends to batch channel
-pub fn collector(
-    data_rx: &Receiver<Result<RecordBatch>>,
-    buffer_tx: &Sender<Result<RecordBatch>>,
+pub fn chunk_collector(
+    batch_rx: &Receiver<Result<RecordBatch>>,
+    prefetch_tx: &Sender<Result<RecordBatch>>,
     schema: &SchemaRef,
     buffer_size: usize,
 ) {
@@ -135,13 +135,13 @@ pub fn collector(
         let mut parts: Vec<RecordBatch> = Vec::new();
         let mut rows = 0;
         while rows < buffer_size {
-            match data_rx.recv() {
+            match batch_rx.recv() {
                 Ok(Ok(chunk_data)) => {
                     rows += chunk_data.num_rows();
                     parts.push(chunk_data);
                 }
                 Ok(Err(e)) => {
-                    let _ = buffer_tx.send(Err(e));
+                    let _ = prefetch_tx.send(Err(e));
                     return; // upstream error
                 }
                 Err(_) => return, // consumer dropped
@@ -150,11 +150,11 @@ pub fn collector(
         let buffer = match concat_batches(schema, &parts) {
             Ok(buffer) => buffer,
             Err(e) => {
-                let _ = buffer_tx.send(Err(e.into()));
+                let _ = prefetch_tx.send(Err(e.into()));
                 return; // error concatenating batches
             }
         };
-        if buffer_tx.send(Ok(buffer)).is_err() {
+        if prefetch_tx.send(Ok(buffer)).is_err() {
             return; // consumer dropped
         }
     }

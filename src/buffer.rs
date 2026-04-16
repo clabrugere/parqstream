@@ -38,7 +38,7 @@ pub struct BufferSnapshot {
 
 #[derive(Debug)]
 pub struct Buffer {
-    rx: Receiver<Result<RecordBatch>>,
+    prefetch_rx: Receiver<Result<RecordBatch>>,
     shuffle: bool,
     data: Option<RecordBatch>,
     offset: usize,
@@ -53,14 +53,14 @@ pub struct Buffer {
 
 impl Buffer {
     pub fn new(
-        rx: Receiver<Result<RecordBatch>>,
+        prefetch_rx: Receiver<Result<RecordBatch>>,
         shuffle: bool,
         seed: u64,
         seed_offset: usize,
         initial_offset: usize,
     ) -> Self {
         Self {
-            rx,
+            prefetch_rx,
             shuffle,
             data: None,
             offset: 0,
@@ -95,7 +95,7 @@ impl Buffer {
                 .then(|| data.slice(self.offset, data.num_rows() - self.offset))
         });
 
-        match py.detach(|| self.rx.recv()) {
+        match py.detach(|| self.prefetch_rx.recv()) {
             Ok(Ok(next)) => {
                 let next = self.maybe_shuffle(next)?;
                 // Record tail size before stitching so checkpoint.rs can locate the fresh-data boundary.

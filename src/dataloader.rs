@@ -11,7 +11,7 @@ use crate::buffer::Buffer;
 use crate::checkpoint::{Checkpoint, Cursor};
 use crate::dataset::Dataset;
 use crate::error::{Error, Result};
-use crate::pipeline::{chunk_feeder, collector, read_feeder, Chunk};
+use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk};
 
 /// Stores the state of a Dataloader, which can be serialized to a Checkpoint for saving and resuming later
 #[derive(Debug, Default)]
@@ -25,9 +25,9 @@ pub struct DataLoaderState {
 /// Dataloader with prefetching.
 ///
 /// Calling `__iter__` (or iterating with a for loop) starts:
-/// 1. a thread that emit chunks of rows groups to a chunk channel (feeder)
-/// 2. `num_workers` threads that read chunks from the chunk channel, load them from disk and send to a data channel (workers)
-/// 3. a thread that collects chunks from the data channel until it has > `buffer_size` rows, concatenates them and sends to a batch channel (collector)
+/// 1. a thread that emit row groups metadata chunks to a reader channel (chunk_dispatcher)
+/// 2. `num_workers` threads that receive metadata from the chunk dispatcher, load them from disk and sends them to a data channel (chunk_reader)
+/// 3. a thread that collects chunks from the data channel until it has > `buffer_size` rows, concatenates them and sends to a batch channel (chunk_collector)
 ///
 /// The main thread consumes batches from the batch channel, yielding them to Python. Up to `prefetch_factor` batches can be buffered in the batch channel,
 /// and the GIL is released while waiting for batches to allow the background threads to run.
@@ -72,15 +72,15 @@ impl DataLoader {
             .collect::<Vec<_>>();
 
         let (chunk_tx, chunk_rx) = bounded::<Chunk>(self.num_workers * 2);
-        let (data_tx, data_rx) = bounded::<Result<RecordBatch>>(self.num_workers + 2);
-        let (buffer_tx, buffer_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
+        let (batch_tx, batch_rx) = bounded::<Result<RecordBatch>>(self.num_workers + 2);
+        let (prefetch_tx, prefetch_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
         // chunk feeder sending row group read tasks to workers
         let epoch_offset = cursor.epoch_offset;
         let row_group_offset = cursor.row_group_offset;
         let intra_row_group_offset = cursor.intra_row_group_offset;
         thread::spawn(move || {
-            chunk_feeder(
+            chunk_dispatcher(
                 &chunk_tx,
                 &row_group_lengths,
                 chunk_size,
@@ -95,17 +95,17 @@ impl DataLoader {
         // workers read a contiguous chunk from a row group
         for _ in 0..self.num_workers {
             let chunk_rx = chunk_rx.clone();
-            let data_tx = data_tx.clone();
+            let data_tx = batch_tx.clone();
             let dataset = dataset.clone();
-            thread::spawn(move || read_feeder(&chunk_rx, &data_tx, &dataset));
+            thread::spawn(move || chunk_reader(&chunk_rx, &data_tx, &dataset));
         }
-        drop(data_tx);
+        drop(batch_tx);
 
         // collect chunks until > buffer_size rows, then concatenate and send to batch buffer
         let schema = dataset.projected_schema.clone();
-        thread::spawn(move || collector(&data_rx, &buffer_tx, &schema, buffer_size));
+        thread::spawn(move || chunk_collector(&batch_rx, &prefetch_tx, &schema, buffer_size));
 
-        buffer_rx
+        prefetch_rx
     }
 }
 
@@ -179,16 +179,12 @@ impl DataLoader {
                 checkpoint.steps_remaining,
                 checkpoint.cursor,
             ),
-            None => (
-                slf.epoch_seed(),
-                slf.num_steps,
-                Cursor::default(),
-            ),
+            None => (slf.epoch_seed(), slf.num_steps, Cursor::default()),
         };
 
-        let buffer_rx = slf.spawn_pipeline(seed, &cursor);
+        let prefetch_rx = slf.spawn_pipeline(seed, &cursor);
         let buffer = Buffer::new(
-            buffer_rx,
+            prefetch_rx,
             slf.shuffle,
             seed,
             cursor.buffer_seed_offset,
