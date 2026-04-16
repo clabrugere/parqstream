@@ -25,9 +25,9 @@ pub struct DataLoaderState {
 /// Dataloader with prefetching.
 ///
 /// Calling `__iter__` (or iterating with a for loop) starts:
-/// 1. a thread that emit row groups metadata chunks to a reader channel (chunk_dispatcher)
-/// 2. `num_workers` threads that receive metadata from the chunk dispatcher, load them from disk and sends them to a data channel (chunk_reader)
-/// 3. a thread that collects chunks from the data channel until it has > `buffer_size` rows, concatenates them and sends to a batch channel (chunk_collector)
+/// 1. a thread that emit row groups metadata chunks to a reader channel (`chunk_dispatcher`)
+/// 2. `num_workers` threads that receive metadata from the chunk dispatcher, load them from disk and sends them to a data channel (`chunk_reader`)
+/// 3. a thread that collects chunks from the data channel until it has > `buffer_size` rows, concatenates them and sends to a batch channel (`chunk_collector`)
 ///
 /// The main thread consumes batches from the batch channel, yielding them to Python. Up to `prefetch_factor` batches can be buffered in the batch channel,
 /// and the GIL is released while waiting for batches to allow the background threads to run.
