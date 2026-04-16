@@ -25,12 +25,15 @@ pub struct DataLoaderState {
 /// Dataloader with prefetching.
 ///
 /// Calling `__iter__` (or iterating with a for loop) starts:
-/// 1. a thread that emit row groups metadata chunks to a reader channel (`chunk_dispatcher`)
-/// 2. `num_workers` threads that receive metadata from the chunk dispatcher, load them from disk and sends them to a data channel (`chunk_reader`)
-/// 3. a thread that collects chunks from the data channel until it has > `buffer_size` rows, concatenates them and sends to a batch channel (`chunk_collector`)
+/// 1. a thread that emits row-group metadata chunks to a reader channel (`chunk_dispatcher`)
+/// 2. `num_workers` threads that receive metadata from the chunk dispatcher, load them from disk and send them to a data channel (`chunk_reader`)
+/// 3. a thread that collects chunks from the data channel until it has > `buffer_size` rows, concatenates them into a fill, and sends it to a fill channel (`chunk_collector`)
+/// 4. the main thread reads fills from the fill channel via a `Buffer`, which optionally shuffles each fill
+///    and slices it into `batch_size` batches; any unconsumed rows from the previous fill are prepended so
+///    batches never straddle a fill boundary with a gap
 ///
-/// The main thread consumes batches from the batch channel, yielding them to Python. Up to `prefetch_factor` batches can be buffered in the batch channel,
-/// and the GIL is released while waiting for batches to allow the background threads to run.
+/// Up to `prefetch_factor` fills can be buffered in the channel, and the GIL is released while waiting
+/// to allow the background threads to run.
 ///
 /// The iterator runs for exactly `num_steps` batches, then raises `StopIteration`.
 /// Dropping or garbage-collecting the `DataLoader` signals the background threads to stop early.

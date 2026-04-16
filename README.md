@@ -20,9 +20,10 @@ Stream batches from Parquet files without loading everything into memory. Suppor
 **`DataLoader(dataset, batch_size, num_steps=None, ...)`** — iterator that yields `dict[str, np.ndarray]` batches. When `num_steps` is `None` the loader cycles over the dataset indefinitely. Internally spawns:
 1. A feeder thread that emits row-group chunks (optionally shuffled)
 2. `num_workers` worker threads that read chunks from disk off the GIL
-3. A collector thread that assembles chunks into batches of `buffer_size` rows, optionally shuffled before yielding
+3. A collector thread that assembles chunks into fills of `buffer_size` rows
+4. The main thread reads fills via a buffer that optionally shuffles each fill and slices it into `batch_size` batches; any unconsumed rows from the previous fill are prepended so batches never straddle a fill boundary with a gap
 
-The batch channel has capacity `prefetch_factor`, so the next batch can be prepared while the current one is consumed. Combined row-group and buffer shuffling gives approximate uniform random sampling.
+The fill channel has capacity `prefetch_factor`, so the next fill can be prepared while the current one is consumed. Combined row-group and buffer shuffling gives approximate uniform random sampling.
 
 Columns are transferred to Python via Arrow PyCapsule — zero-copy for dense numeric columns, one copy for nullable or string columns.
 
