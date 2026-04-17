@@ -131,17 +131,17 @@ Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 fl
 
 | batch_size | w=1 | w=2 | w=4 | w=8 |
 |---|---|---|---|---|
-| 1024 | 37.7M rows/s | 48.6M rows/s | 47.5M rows/s | 39.7M rows/s |
-| 2048 | 38.3M rows/s | 56.7M rows/s | 69.7M rows/s | 55.9M rows/s |
-| 4096 | 38.3M rows/s | 57.3M rows/s | **70.1M rows/s** | 56.7M rows/s |
+| 1024 | 38.7M rows/s | 46.6M rows/s | 46.7M rows/s | 39.5M rows/s |
+| 2048 | 39.1M rows/s | 58.3M rows/s | 76.5M rows/s | 56.1M rows/s |
+| 4096 | 39.0M rows/s | 60.5M rows/s | **78.7M rows/s** | 61.7M rows/s |
 
 **Shuffled** (rows groups and buffer shuffle)
 
 | batch_size | w=1 | w=2 | w=4 | w=8 |
 |---|---|---|---|---|
-| 1024 | 29.8M rows/s | 29.4M rows/s | 28.8M rows/s | 25.2M rows/s |
-| 2048 | 36.1M rows/s | 39.0M rows/s | 38.1M rows/s | 32.0M rows/s |
-| 4096 | 36.3M rows/s | 46.8M rows/s | **45.2M rows/s** | 36.3M rows/s |
+| 1024 | 31.5M rows/s | 30.8M rows/s | 29.5M rows/s | 25.6M rows/s |
+| 2048 | 36.5M rows/s | 40.7M rows/s | 39.2M rows/s | 32.2M rows/s |
+| 4096 | 36.8M rows/s | 51.0M rows/s | **48.3M rows/s** | 38.7M rows/s |
 
 A first warm-up run is done over the whole data, so results are probably slightly optimistic because some low level 
 caching might be happening.

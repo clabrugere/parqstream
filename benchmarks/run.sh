@@ -2,7 +2,7 @@
 set -e
 
 echo "Sync local dev environment"
-uv sync --extra dev
+uv sync --extra bench
 
 echo "Build and install rust core..."
 maturin develop --release

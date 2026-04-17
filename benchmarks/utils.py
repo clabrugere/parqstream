@@ -1,8 +1,5 @@
-import json
-import os
 import time
 from dataclasses import dataclass
-from logging import Logger
 
 
 @dataclass
@@ -47,23 +44,4 @@ def measure_throughput(loader) -> BenchmarkResult:
         batch_per_sec=total_batches / elapsed,
         total_batches=total_batches,
         elapsed_s=elapsed,
-    )
-
-
-def save_result(results: list[dict], results_dir: str, name: str) -> str:
-    os.makedirs(results_dir, exist_ok=True)
-    path = os.path.join(results_dir, f"{name}.json")
-    with open(path, "w") as f:
-        json.dump(results, f)
-
-    return path
-
-
-def print_result(label: str, result: BenchmarkResult, logger: Logger) -> None:
-    rows_per_sec = result.rows_per_sec
-    elapsed = result.elapsed_s
-    total = result.total_rows
-
-    logger.info(
-        f"  {label:<25} {rows_per_sec:>6,.0f} rows/s ({total:,} rows in {elapsed:.1f}s) {result.batch_per_sec:>6,.0f} batches/s ({result.total_batches:,} batches)"
     )

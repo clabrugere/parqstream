@@ -11,7 +11,7 @@ dependencies = ["numpy", "pyarrow"]
 
 [project.optional-dependencies]
 dev = ["maturin", "pytest", "torch"]
-bench = ["torch", "psutil", "matplotlib", "pynvml"]
+bench = ["maturin"]
 build_wheel = ["maturin[zig]"]
 
 [tool.uv.sources]

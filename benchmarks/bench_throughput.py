@@ -1,71 +1,53 @@
 import argparse
 import glob
+import json
 import logging
 import os
 import sys
 from datetime import datetime
 
 from parqstream import DataLoader, Dataset
-from utils import Benchmark, measure_throughput, print_result, save_result
+from utils import measure_throughput
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-
-def configs():
-    for shuffle in [False, True]:
-        for batch_size in [1024, 2048, 4094]:
-            for num_workers in [1, 2, 4, 8]:
-                yield batch_size, num_workers, shuffle
+BATCH_SIZES = [1024, 2048, 4096]
+NUM_WORKERS = [1, 2, 4, 8]
 
 
-def run_sweep(paths: list[str], results_dir: str, prefetch_factor: int, buffer_size: int) -> list[dict]:
-    dataset = Dataset(paths)
+def run(dataset: Dataset, prefetch_factor: int, buffer_size: int) -> dict:
     total_rows = len(dataset)
-    results = []
+    results = {}
 
-    logger.info(f"parqstream -  ({total_rows:,} rows, {len(paths)} shards)")
+    for shuffle in [False, True]:
+        mode = "shuffled" if shuffle else "sequential"
+        results[mode] = {}
+        for batch_size in BATCH_SIZES:
+            num_steps = max(total_rows // batch_size, 1)
+            base_args = {
+                "batch_size": batch_size,
+                "num_steps": num_steps,
+                "shuffle": shuffle,
+                "buffer_size": buffer_size,
+            }
+            row = {}
+            for num_workers in NUM_WORKERS:
+                for _ in DataLoader(dataset, num_workers=num_workers, **base_args):
+                    pass
+                comb_results = measure_throughput(
+                    DataLoader(
+                        dataset,
+                        prefetch_factor=prefetch_factor,
+                        num_workers=num_workers,
+                        **base_args,
+                    )
+                )
+                rps = round(comb_results.rows_per_sec / 1e6, 1)
+                row[f"w={num_workers}"] = {**comb_results.__dict__}
+                logger.info(f"- {mode} bs={batch_size} w={num_workers} -> {rps}M rows/s")
 
-    for batch_size, num_workers, shuffle in configs():
-        label = f"{'shuffled' if shuffle else 'sequential'} bs={batch_size:} w={num_workers}"
-        num_steps = max(total_rows // batch_size, 1)
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_steps=num_steps,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            buffer_size=buffer_size,
-        )
-
-        # do a full pass over the data
-        warm = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_steps=num_steps,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            buffer_size=buffer_size,
-        )
-        for _ in warm:
-            pass
-
-        benchmark = Benchmark(
-            system="parqstream",
-            batch_size=batch_size,
-            num_workers=num_workers,
-            shuffle=shuffle,
-            results=measure_throughput(loader),
-        )
-        print_result(label, benchmark.results, logger)
-        results.append(benchmark)
-
-    save_result(
-        {"bench": "throughput", "results": [r.to_dict() for r in results]},
-        results_dir,
-        f"bench_throughput_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-    )
+            results[mode][str(batch_size)] = row
 
     return results
 
@@ -82,5 +64,12 @@ if __name__ == "__main__":
     if not paths:
         sys.exit(f"No .parquet files found in {args.data}. Run generate_data.py first.")
 
-    run_sweep(paths, args.results, args.prefetch_factor, args.buffer_size)
-    run_sweep(paths, args.results, args.prefetch_factor, args.buffer_size)
+    dataset = Dataset(paths)
+    logger.info(f"{len(dataset):,} rows, {len(paths)} shards")
+    results = run(dataset, args.prefetch_factor, args.buffer_size)
+
+    os.makedirs(args.results, exist_ok=True)
+    out = os.path.join(args.results, f"bench_throughput_{datetime.now().strftime('%Y%m%d%H%M%S')}.json")
+    with open(out, "w") as f:
+        json.dump(results, f, indent=2)
+    logger.info(f"saved to {out}")
