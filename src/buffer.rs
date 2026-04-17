@@ -5,7 +5,9 @@ use arrow::compute::{concat_batches, take};
 use arrow::record_batch::RecordBatch;
 use crossbeam_channel::Receiver;
 use pyo3::Python;
-use rand::prelude::*;
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
 
 use crate::error::Result;
 
@@ -25,23 +27,56 @@ pub fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<Record
     Ok(RecordBatch::try_new(buffer.schema(), columns)?)
 }
 
+#[derive(Debug, Default)]
+pub struct BufferSnapshot {
+    pub offset: usize,
+    /// Number of refills that have occurred; used to derive the shuffle seed for the next fill.
+    pub seed_offset: usize,
+    /// Rows stitched from the previous fill into the current one (see `Buffer::refill`).
+    pub tail_size: usize,
+}
+
+#[derive(Debug)]
 pub struct Buffer {
-    rx: Receiver<Result<RecordBatch>>,
+    prefetch_rx: Receiver<Result<RecordBatch>>,
     shuffle: bool,
     data: Option<RecordBatch>,
     offset: usize,
-    rng: SmallRng,
+    seed: u64,
+    /// Incremented after each refill; the nth fill is shuffled with `SmallRng(seed + seed_offset_at_that_fill)`.
+    seed_offset: usize,
+    /// Applied once on the first refill to skip into a partially-consumed buffer (checkpoint resume).
+    resume_offset: usize,
+    /// Rows prepended from the previous fill; snapshotted so checkpoint can correct its cursor.
+    tail_size: usize,
 }
 
 impl Buffer {
-    pub fn new(rx: Receiver<Result<RecordBatch>>, shuffle: bool, seed: Option<u64>) -> Self {
-        let rng = seed.map_or_else(rand::make_rng, SmallRng::seed_from_u64);
+    pub fn new(
+        prefetch_rx: Receiver<Result<RecordBatch>>,
+        shuffle: bool,
+        seed: u64,
+        seed_offset: usize,
+        resume_offset: usize,
+    ) -> Self {
         Self {
-            rx,
+            prefetch_rx,
             shuffle,
             data: None,
             offset: 0,
-            rng,
+            seed,
+            seed_offset,
+            resume_offset,
+            tail_size: 0,
+        }
+    }
+
+    fn maybe_shuffle(&self, batch: RecordBatch) -> Result<RecordBatch> {
+        if self.shuffle {
+            let mut rng = SmallRng::seed_from_u64(self.seed + self.seed_offset as u64);
+            shuffle_buffer(&batch, &mut rng)
+        } else {
+            Ok(batch)
         }
     }
 
@@ -51,27 +86,31 @@ impl Buffer {
             .is_none_or(|batch| self.offset + num_rows > batch.num_rows())
     }
 
-    // fetch the next buffer from the channel, stitching any remaining rows from the current buffer
+    // Fetch the next fill from the channel. Any unconsumed rows from the current buffer are
+    // prepended (stitched) so batches never straddle a fill boundary with a gap. The stitched
+    // tail retains its previous shuffle; only the fresh data is shuffled with the new seed.
     fn refill(&mut self, py: Python<'_>) -> Result<bool> {
         let remaining_rows = self.data.as_ref().and_then(|data| {
             (self.offset < data.num_rows())
                 .then(|| data.slice(self.offset, data.num_rows() - self.offset))
         });
 
-        match py.detach(|| self.rx.recv()) {
+        match py.detach(|| self.prefetch_rx.recv()) {
             Ok(Ok(next)) => {
-                let next = if self.shuffle {
-                    shuffle_buffer(&next, &mut self.rng)?
-                } else {
-                    next
-                };
+                let next = self.maybe_shuffle(next)?;
+                // Record tail size before stitching so checkpoint.rs can locate the fresh-data boundary.
+                self.tail_size = remaining_rows.as_ref().map_or(0, RecordBatch::num_rows);
                 self.data = Some(match remaining_rows {
                     Some(remaining_rows) => {
                         concat_batches(&next.schema(), &[remaining_rows, next])?
                     }
                     None => next,
                 });
-                self.offset = 0;
+                // resume_offset is non-zero only on the first refill after a checkpoint restore;
+                // it skips past the tail portion that cannot be reconstructed on resume.
+                self.offset = self.resume_offset;
+                self.resume_offset = 0;
+                self.seed_offset += 1;
                 Ok(true)
             }
             Ok(Err(e)) => Err(e), // upstream error
@@ -89,5 +128,13 @@ impl Buffer {
         let batch = data.slice(self.offset, length);
         self.offset += length;
         Ok(Some(batch))
+    }
+
+    pub fn snapshot(&self) -> BufferSnapshot {
+        BufferSnapshot {
+            offset: self.offset,
+            seed_offset: self.seed_offset,
+            tail_size: self.tail_size,
+        }
     }
 }

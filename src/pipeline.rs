@@ -2,10 +2,35 @@ use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
 use crossbeam_channel::{Receiver, Sender};
-use rand::prelude::*;
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 
 use crate::dataset::Dataset;
 use crate::error::Result;
+
+#[allow(clippy::struct_field_names)]
+#[derive(Debug)]
+struct EpochCursor {
+    pub epoch_offset: usize,
+    pub row_group_offset: usize,
+    pub intra_row_group_offset: usize,
+}
+
+impl EpochCursor {
+    pub fn advance(&mut self, num_rows: usize, row_group_length: usize) {
+        self.intra_row_group_offset += num_rows;
+        if self.intra_row_group_offset >= row_group_length {
+            self.row_group_offset += 1;
+            self.intra_row_group_offset = 0;
+        }
+    }
+    pub fn new_epoch(&mut self) {
+        self.epoch_offset += 1;
+        self.row_group_offset = 0;
+        self.intra_row_group_offset = 0;
+    }
+}
 
 #[derive(Debug)]
 pub struct Chunk {
@@ -15,58 +40,67 @@ pub struct Chunk {
 }
 
 // continuously sends row group read tasks to the chunk channel, shuffled if needed
-pub fn chunk_feeder(
+#[allow(clippy::too_many_arguments)]
+pub fn chunk_dispatcher(
     chunk_tx: &Sender<Chunk>,
     row_group_lengths: &[usize],
     chunk_size: usize,
     shuffle: bool,
-    seed: Option<u64>,
+    seed: u64,
+    epoch_offset: usize,
+    row_group_offset: usize,
+    intra_row_group_offset: usize,
 ) {
+    let mut cursor = EpochCursor {
+        epoch_offset,
+        row_group_offset,
+        intra_row_group_offset,
+    };
+
     let num_groups = row_group_lengths.len();
-    let mut rng = seed.map_or_else(rand::make_rng, SmallRng::seed_from_u64);
+    // Row group visit order for the current epoch. Shuffle seed = seed + epoch_offset so
+    // each epoch gets an independent, deterministic order (matches resolve_cursor in checkpoint.rs).
     let mut order = (0..num_groups).collect::<Vec<_>>();
     if shuffle {
-        order.shuffle(&mut rng);
+        order.shuffle(&mut SmallRng::seed_from_u64(
+            seed + cursor.epoch_offset as u64,
+        ));
     }
 
-    let mut row_group_offset = 0;
-    let mut intra_row_group_offset = 0;
-
     loop {
-        // new epoch , re-shuffle if needed
-        if row_group_offset >= num_groups {
+        if cursor.row_group_offset >= num_groups {
+            cursor.new_epoch();
             if shuffle {
-                order.shuffle(&mut rng);
+                // Reset to identity before shuffling: re-shuffling a non-identity slice would
+                // make epoch N's order depend on epoch N-1's, breaking checkpoint resume.
+                order = (0..num_groups).collect();
+                order.shuffle(&mut SmallRng::seed_from_u64(
+                    seed + cursor.epoch_offset as u64,
+                ));
             }
-            row_group_offset = 0;
-            intra_row_group_offset = 0;
         }
-        let row_group_idx = order[row_group_offset];
+        let row_group_idx = order[cursor.row_group_offset];
         let row_group_length = row_group_lengths[row_group_idx];
-        let num_rows = chunk_size.min(row_group_length - intra_row_group_offset);
+        let num_rows = chunk_size.min(row_group_length - cursor.intra_row_group_offset);
 
         if chunk_tx
             .send(Chunk {
                 row_group_idx,
-                start_row: intra_row_group_offset,
+                start_row: cursor.intra_row_group_offset,
                 num_rows,
             })
             .is_err()
         {
             return; // consumer dropped
         }
-        intra_row_group_offset += num_rows;
-        if intra_row_group_offset >= row_group_length {
-            row_group_offset += 1;
-            intra_row_group_offset = 0;
-        }
+        cursor.advance(num_rows, row_group_length);
     }
 }
 
 // reads chunks received from the chunk channel, gather rows and sends record batches to the batch channel
-pub fn read_feeder(
+pub fn chunk_reader(
     chunk_rx: &Receiver<Chunk>,
-    data_tx: &Sender<Result<RecordBatch>>,
+    batch_tx: &Sender<Result<RecordBatch>>,
     dataset: &Dataset,
 ) {
     for Chunk {
@@ -78,12 +112,12 @@ pub fn read_feeder(
         let meta = &dataset.row_group_index[row_group_idx];
         match dataset.read_row_group_range(meta.file_idx, meta.row_group_idx, start_row, num_rows) {
             Ok(chunk_data) => {
-                if data_tx.send(Ok(chunk_data)).is_err() {
+                if batch_tx.send(Ok(chunk_data)).is_err() {
                     return; // consumer dropped
                 }
             }
             Err(e) => {
-                let _ = data_tx.send(Err(e));
+                let _ = batch_tx.send(Err(e));
                 return; // upstream error
             }
         }
@@ -91,9 +125,9 @@ pub fn read_feeder(
 }
 
 // continuously collects chunks until > buffer_size rows, concatenates and sends to batch channel
-pub fn collector(
-    data_rx: &Receiver<Result<RecordBatch>>,
-    buffer_tx: &Sender<Result<RecordBatch>>,
+pub fn chunk_collector(
+    batch_rx: &Receiver<Result<RecordBatch>>,
+    prefetch_tx: &Sender<Result<RecordBatch>>,
     schema: &SchemaRef,
     buffer_size: usize,
 ) {
@@ -101,13 +135,13 @@ pub fn collector(
         let mut parts: Vec<RecordBatch> = Vec::new();
         let mut rows = 0;
         while rows < buffer_size {
-            match data_rx.recv() {
+            match batch_rx.recv() {
                 Ok(Ok(chunk_data)) => {
                     rows += chunk_data.num_rows();
                     parts.push(chunk_data);
                 }
                 Ok(Err(e)) => {
-                    let _ = buffer_tx.send(Err(e));
+                    let _ = prefetch_tx.send(Err(e));
                     return; // upstream error
                 }
                 Err(_) => return, // consumer dropped
@@ -116,11 +150,11 @@ pub fn collector(
         let buffer = match concat_batches(schema, &parts) {
             Ok(buffer) => buffer,
             Err(e) => {
-                let _ = buffer_tx.send(Err(e.into()));
+                let _ = prefetch_tx.send(Err(e.into()));
                 return; // error concatenating batches
             }
         };
-        if buffer_tx.send(Ok(buffer)).is_err() {
+        if prefetch_tx.send(Ok(buffer)).is_err() {
             return; // consumer dropped
         }
     }

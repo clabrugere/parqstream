@@ -49,9 +49,6 @@ pub enum Error {
 
     #[error(transparent)]
     Arrow(#[from] ArrowError),
-
-    #[error("worker thread error: {0}")]
-    WorkerThread(String),
 }
 
 pub type Result<T> = StdResult<T, Error>;

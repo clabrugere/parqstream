@@ -6,11 +6,11 @@ from typing import Any, Callable
 import numpy as np
 import pyarrow as pa
 
-from parqstream._parqstream import Column
+from parqstream._parqstream import Checkpoint, Column
 from parqstream._parqstream import DataLoader as _RustDataLoader
 from parqstream._parqstream import Dataset as _RustDataset
 
-__all__ = ["Dataset", "DataLoader"]
+__all__ = ["Dataset", "DataLoader", "Checkpoint"]
 
 
 def _col_to_numpy(col: Column) -> np.ndarray:
@@ -48,6 +48,10 @@ class DataLoader:
             returns whatever the iteration protocol should yield. When provided,
             the default numpy conversion is bypassed entirely, so the callable
             is responsible for all column extraction and type conversion.
+
+    Use :meth:`checkpoint` / :meth:`load_checkpoint` to save and resume
+    iteration position. :meth:`state_dict` / :meth:`load_state_dict` are
+    convenience wrappers that convert the checkpoint to and from a plain dict.
     """
 
     def __init__(
@@ -74,9 +78,9 @@ class DataLoader:
         )
         self._collate_fn = collate_fn
 
-    def __iter__(self) -> DataLoader:
+    def __iter__(self) -> DataLoaderIterator:
         self._dataloader.__iter__()
-        return self
+        return DataLoaderIterator(self)
 
     def __next__(self) -> dict[str, np.ndarray] | Any:
         batch = next(self._dataloader)
@@ -91,6 +95,33 @@ class DataLoader:
 
     def __repr__(self) -> str:
         return repr(self._dataloader)
+
+    def checkpoint(self) -> Checkpoint:
+        return self._dataloader.checkpoint()
+
+    def load_checkpoint(self, checkpoint: Checkpoint) -> None:
+        self._dataloader.load_checkpoint(checkpoint)
+
+    def state_dict(self) -> dict[str, Any]:
+        return self._dataloader.checkpoint().to_dict()
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self._dataloader.load_checkpoint(Checkpoint.from_dict(state))
+
+
+class DataLoaderIterator:
+    """Iterator returned by :meth:`DataLoader.__iter__`."""
+
+    __slots__ = ("_loader",)
+
+    def __init__(self, loader: DataLoader) -> None:
+        self._loader = loader
+
+    def __iter__(self) -> DataLoaderIterator:
+        return self
+
+    def __next__(self) -> dict[str, np.ndarray] | Any:
+        return self._loader.__next__()
 
 
 class Dataset:
