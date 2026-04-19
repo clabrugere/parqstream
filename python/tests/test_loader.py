@@ -56,7 +56,7 @@ def test_len_infinite(parquet_path):
     ds = Dataset([parquet_path], columns=["id"])
     loader = DataLoader(ds, batch_size=512, num_steps=None)
 
-    with pytest.raises(ValueError, match="length is undefined for infinite DataLoader"):
+    with pytest.raises(TypeError, match="length is undefined for infinite DataLoader, set num_steps to enable __len__"):
         _ = len(loader)
 
 
@@ -316,7 +316,7 @@ def test_resume_different_dataset(parquet_path):
     state = loader.state_dict()
 
     new_loader = DataLoader(ds2, batch_size=512, num_steps=10)
-    with pytest.raises(ValueError, match="dataset identifier mismatch"):
+    with pytest.raises(ValueError, match="dataset mismatch"):
         new_loader.load_state_dict(state)
 
 

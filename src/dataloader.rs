@@ -3,7 +3,6 @@ use std::thread;
 
 use arrow::record_batch::RecordBatch;
 use crossbeam_channel::{bounded, Receiver};
-use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
 
 use crate::batch::Batch;
@@ -137,24 +136,22 @@ impl DataLoader {
         seed: Option<u64>,
     ) -> PyResult<Self> {
         if batch_size == 0 {
-            return Err(PyValueError::new_err("batch_size must be > 0"));
+            return Err(Error::InvalidBatchSize(batch_size).into());
         }
         if num_steps == Some(0) {
-            return Err(PyValueError::new_err("num_steps must be > 0"));
+            return Err(Error::InvalidNumSteps(0).into());
         }
         if num_workers == 0 {
-            return Err(PyValueError::new_err("num_workers must be > 0"));
+            return Err(Error::InvalidNumWorkers(0).into());
         }
         if prefetch_factor == 0 {
-            return Err(PyValueError::new_err("prefetch_factor must be > 0"));
+            return Err(Error::InvalidPrefetchFactor(0).into());
         }
         if buffer_size.is_some_and(|bs| bs < batch_size) {
-            return Err(PyValueError::new_err("buffer_size must be >= batch_size"));
+            return Err(Error::InvalidBufferSize(buffer_size.unwrap()).into());
         }
 
-        let available_cores = thread::available_parallelism()
-            .map_err(|e| Error::ThreadDetermination(e.to_string()))?
-            .get();
+        let available_cores = thread::available_parallelism()?.get();
 
         Ok(Self {
             dataset: Arc::new(dataset.clone()),
@@ -208,12 +205,10 @@ impl DataLoader {
         let state = &mut slf.state;
 
         let Some(buffer) = state.buffer.as_mut() else {
-            return Err(PyRuntimeError::new_err(
-                "iteration not started, call iter(dataloader) first",
-            ));
+            return Err(Error::IterationNotStarted.into());
         };
         if state.steps_remaining == Some(0) {
-            return Err(PyStopIteration::new_err("DataLoader consumed"));
+            return Err(Error::DataLoaderConsumed.into());
         }
         match buffer.take(batch_size, py) {
             Ok(Some(batch)) => {
@@ -223,17 +218,15 @@ impl DataLoader {
                 state.rows_yielded += batch.num_rows();
                 Ok(Batch::new(batch))
             }
-            Ok(None) => Err(PyStopIteration::new_err("DataLoader consumed")),
-            Err(e) => Err(PyRuntimeError::new_err(format!("worker error: {e}"))),
+            Ok(None) => Err(Error::DataLoaderConsumed.into()),
+            Err(e) => Err(e.into()),
         }
     }
 
     pub fn checkpoint(&self) -> PyResult<Checkpoint> {
         // check if __iter__ has been called at least once
         if self.state.buffer.is_none() {
-            return Err(PyRuntimeError::new_err(
-                "no state to serialize, call iter(dataloader) first",
-            ));
+            return Err(Error::NoStateToCheckpoint.into());
         }
         // if a checkpoint is already stored and hasn't been consumed by __iter__, return it directly
         if let Some(checkpoint) = &self.checkpoint {
@@ -256,10 +249,11 @@ impl DataLoader {
     /// the same total number of batches as the original run.
     pub fn load_checkpoint(&mut self, checkpoint: Checkpoint) -> PyResult<()> {
         if checkpoint.dataset_identifier != self.dataset.identifier {
-            return Err(PyValueError::new_err(format!(
-                "dataset identifier mismatch: checkpoint={:#x}, current={:#x}",
-                checkpoint.dataset_identifier, self.dataset.identifier
-            )));
+            return Err(Error::DatasetMismatch {
+                checkpoint: checkpoint.dataset_identifier,
+                current: self.dataset.identifier,
+            }
+            .into());
         }
         self.state.epoch = checkpoint.epoch;
         self.checkpoint = Some(checkpoint);
@@ -267,11 +261,7 @@ impl DataLoader {
     }
 
     pub fn __len__(&self) -> PyResult<usize> {
-        self.num_steps.ok_or_else(|| {
-            PyValueError::new_err(
-                "length is undefined for infinite DataLoader; set num_steps to a finite value to enable __len__",
-            )
-        })
+        self.num_steps.ok_or_else(|| Error::UndefinedLength.into())
     }
 
     pub fn __repr__(&self) -> String {

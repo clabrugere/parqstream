@@ -1,4 +1,3 @@
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 use rand::rngs::SmallRng;
@@ -8,6 +7,7 @@ use rand::SeedableRng;
 use crate::buffer::{Buffer, BufferSnapshot};
 use crate::dataloader::DataLoaderState;
 use crate::dataset::RowGroupMeta;
+use crate::error::{Error, Result};
 
 /// Position within the infinite row-group stream, used to resume a `DataLoader`.
 ///
@@ -152,55 +152,53 @@ impl Checkpoint {
     }
 
     #[classmethod]
-    pub fn from_dict(_cls: &Bound<'_, PyType>, dict: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let cursor_obj = dict
-            .get_item("cursor")?
-            .ok_or_else(|| PyValueError::new_err("missing key 'cursor'"))?;
+    pub fn from_dict(_cls: &Bound<'_, PyType>, dict: &Bound<'_, PyDict>) -> Result<Self> {
+        let missing = |key: &str| Error::MissingKeyInCheckpoint(key.into());
+
+        let cursor_obj = dict.get_item("cursor")?.ok_or_else(|| missing("cursor"))?;
         let cursor_dict = cursor_obj
             .cast::<PyDict>()
-            .map_err(|_| PyValueError::new_err("'cursor' must be a dict"))?;
+            .map_err(|_| Error::InvalidCheckpointFormat("'cursor' must be a dict".into()))?;
 
         let cursor = Cursor {
             epoch_offset: cursor_dict
                 .get_item("epoch_offset")?
-                .ok_or_else(|| PyValueError::new_err("missing key 'epoch_offset'"))?
+                .ok_or_else(|| missing("cursor.epoch_offset"))?
                 .extract::<usize>()?,
             row_group_offset: cursor_dict
                 .get_item("row_group_offset")?
-                .ok_or_else(|| PyValueError::new_err("missing key 'cursor.row_group_offset'"))?
+                .ok_or_else(|| missing("cursor.row_group_offset"))?
                 .extract::<usize>()?,
             intra_row_group_offset: cursor_dict
                 .get_item("intra_row_group_offset")?
-                .ok_or_else(|| {
-                    PyValueError::new_err("missing key 'cursor.intra_row_group_offset'")
-                })?
+                .ok_or_else(|| missing("cursor.intra_row_group_offset"))?
                 .extract::<usize>()?,
             buffer_seed_offset: cursor_dict
                 .get_item("buffer_seed_offset")?
-                .ok_or_else(|| PyValueError::new_err("missing key 'cursor.buffer_seed_offset'"))?
+                .ok_or_else(|| missing("cursor.buffer_seed_offset"))?
                 .extract::<usize>()?,
             buffer_offset: cursor_dict
                 .get_item("buffer_offset")?
-                .ok_or_else(|| PyValueError::new_err("missing key 'cursor.buffer_offset'"))?
+                .ok_or_else(|| missing("cursor.buffer_offset"))?
                 .extract::<usize>()?,
         };
 
         Ok(Self {
             seed: dict
                 .get_item("seed")?
-                .ok_or_else(|| PyValueError::new_err("missing key 'seed'"))?
+                .ok_or_else(|| missing("seed"))?
                 .extract::<u64>()?,
             dataset_identifier: dict
                 .get_item("dataset_identifier")?
-                .ok_or_else(|| PyValueError::new_err("missing key 'dataset_identifier'"))?
+                .ok_or_else(|| missing("dataset_identifier"))?
                 .extract::<u64>()?,
             epoch: dict
                 .get_item("epoch")?
-                .ok_or_else(|| PyValueError::new_err("missing key 'epoch'"))?
+                .ok_or_else(|| missing("epoch"))?
                 .extract::<usize>()?,
             steps_remaining: dict
                 .get_item("steps_remaining")?
-                .ok_or_else(|| PyValueError::new_err("missing key 'steps_remaining'"))?
+                .ok_or_else(|| missing("steps_remaining"))?
                 .extract::<Option<usize>>()?,
             cursor,
         })
