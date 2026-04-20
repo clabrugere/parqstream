@@ -21,6 +21,7 @@ pub struct Cursor {
     pub intra_row_group_offset: usize,
     pub buffer_seed_offset: usize,
     pub buffer_offset: usize,
+    pub rows_epoch_start: usize, // cumulative baseline; see DataLoaderState::rows_epoch_start
 }
 
 #[pyclass(from_py_object)]
@@ -35,19 +36,23 @@ pub struct Checkpoint {
 
 impl Checkpoint {
     fn resolve_cursor(
-        rows_at_buffer_start: usize,
-        seed: u64, // per-iteration seed
+        state: &DataLoaderState,
         shuffle: bool,
         row_group_index: &[RowGroupMeta],
-        buffer_offset: usize,
-        buffer_seed_offset: usize,
-        buffer_tail_size: usize,
+        buffer_snapshot: &BufferSnapshot,
     ) -> Cursor {
         let total_rows = row_group_index.iter().map(|rg| rg.num_rows).sum::<usize>();
+
+        // rows_epoch_start accumulates the absolute epoch-row baseline across resume levels
+        // so that rows_at_buffer_start stays correct even after chained resumes.
+        let rows_epoch_start = state.rows_epoch_start + state.rows_yielded;
+        let rows_at_buffer_start = rows_epoch_start - buffer_snapshot.offset;
 
         // On resume, data=None so no tail is stitched. Shift the feeder to the fresh-epoch
         // start and correct buffer_offset by -tail_size so resume_offset lands at the right spot.
         // If buffer_offset < tail_size (cursor is mid-tail), fall back to the tail-start position.
+        let buffer_offset = buffer_snapshot.offset;
+        let buffer_tail_size = buffer_snapshot.tail_size;
         let (epoch_rows, corrected_buffer_offset) = if buffer_offset >= buffer_tail_size {
             (
                 rows_at_buffer_start + buffer_tail_size,
@@ -57,15 +62,20 @@ impl Checkpoint {
             (rows_at_buffer_start, buffer_offset)
         };
 
+        // The snapshot captures seed_offset after the last increment; subtract 1 so
+        // Buffer::new starts with the value it had before that refill fired.
+        let buffer_seed_offset = buffer_snapshot.seed_offset.saturating_sub(1);
+
         let epoch_offset = epoch_rows / total_rows;
         let rows = epoch_rows % total_rows;
 
         // Reconstruct the row group visit order for this epoch, mirroring chunk_feeder's logic:
         // always shuffle [0..N) so each epoch's order is independent of the previous one.
         let num_groups = row_group_index.len();
+        let seed = state.iteration_seed + epoch_offset as u64;
         let mut order: Vec<usize> = (0..num_groups).collect();
         if shuffle {
-            order.shuffle(&mut SmallRng::seed_from_u64(seed + epoch_offset as u64));
+            order.shuffle(&mut SmallRng::seed_from_u64(seed));
         }
 
         // Walk the ordered row groups to find which one contains `rows` (always terminates
@@ -87,17 +97,15 @@ impl Checkpoint {
             epoch_offset,
             row_group_offset,
             intra_row_group_offset,
-            // The snapshot captures seed_offset after the last increment; subtract 1 so
-            // Buffer::new starts with the value it had before that refill fired.
-            buffer_seed_offset: buffer_seed_offset.saturating_sub(1),
+            buffer_seed_offset,
             buffer_offset: corrected_buffer_offset,
+            rows_epoch_start,
         }
     }
 
     pub fn from_state(
         state: &DataLoaderState,
         shuffle: bool,
-        seed: u64,
         dataset_identifier: u64,
         row_group_index: &[RowGroupMeta],
     ) -> Self {
@@ -106,23 +114,10 @@ impl Checkpoint {
             .as_ref()
             .map_or(BufferSnapshot::default(), Buffer::snapshot);
 
-        // rows_yielded counts rows delivered to Python; subtracting the current buffer
-        // read position gives the total rows that had been fed into the pipeline before the
-        // current buffer fill started.
-        let rows_at_buffer_start = state.rows_yielded - buffer_snapshot.offset;
-
-        let cursor = Self::resolve_cursor(
-            rows_at_buffer_start,
-            seed,
-            shuffle,
-            row_group_index,
-            buffer_snapshot.offset,
-            buffer_snapshot.seed_offset,
-            buffer_snapshot.tail_size,
-        );
+        let cursor = Self::resolve_cursor(state, shuffle, row_group_index, &buffer_snapshot);
 
         Self {
-            seed,
+            seed: state.iteration_seed,
             dataset_identifier,
             epoch: state.epoch,
             steps_remaining: state.steps_remaining,
@@ -140,6 +135,7 @@ impl Checkpoint {
         cursor.set_item("intra_row_group_offset", self.cursor.intra_row_group_offset)?;
         cursor.set_item("buffer_seed_offset", self.cursor.buffer_seed_offset)?;
         cursor.set_item("buffer_offset", self.cursor.buffer_offset)?;
+        cursor.set_item("rows_epoch_start", self.cursor.rows_epoch_start)?;
 
         let dict = PyDict::new(py);
         dict.set_item("seed", self.seed)?;
@@ -180,6 +176,10 @@ impl Checkpoint {
             buffer_offset: cursor_dict
                 .get_item("buffer_offset")?
                 .ok_or_else(|| missing("cursor.buffer_offset"))?
+                .extract::<usize>()?,
+            rows_epoch_start: cursor_dict
+                .get_item("rows_epoch_start")?
+                .ok_or_else(|| missing("cursor.rows_epoch_start"))?
                 .extract::<usize>()?,
         };
 

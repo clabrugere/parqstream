@@ -15,10 +15,29 @@ use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk};
 /// Stores the state of a Dataloader, which can be serialized to a Checkpoint for saving and resuming later
 #[derive(Debug, Default)]
 pub struct DataLoaderState {
+    pub iteration_seed: u64,
     pub buffer: Option<Buffer>,
     pub steps_remaining: Option<usize>,
     pub epoch: usize,
     pub rows_yielded: usize,
+    pub rows_epoch_start: usize, // 0 for fresh runs, cursor.rows_epoch_start on resume
+}
+
+impl DataLoaderState {
+    /// Start a new iteration with the given seed, buffer, and `steps_remaining`, and reset `rows_yielded`.
+    pub fn new_iteration(
+        &mut self,
+        seed: u64,
+        buffer: Buffer,
+        steps_remaining: Option<usize>,
+        rows_epoch_start: usize,
+    ) {
+        self.iteration_seed = seed;
+        self.buffer = Some(buffer);
+        self.steps_remaining = steps_remaining;
+        self.rows_yielded = 0;
+        self.rows_epoch_start = rows_epoch_start;
+    }
 }
 
 /// Dataloader with prefetching.
@@ -152,7 +171,7 @@ impl DataLoader {
         }
 
         let available_cores = thread::available_parallelism()?.get();
-
+        let seed = seed.unwrap_or_else(rand::random);
         Ok(Self {
             dataset: Arc::new(dataset.clone()),
             batch_size,
@@ -161,7 +180,7 @@ impl DataLoader {
             prefetch_factor,
             shuffle,
             buffer_size,
-            seed: seed.unwrap_or_else(rand::random),
+            seed,
             state: DataLoaderState::default(),
             checkpoint: None,
         })
@@ -191,10 +210,8 @@ impl DataLoader {
             cursor.buffer_offset,
         );
 
-        // update state for new iteration
-        slf.state.buffer = Some(buffer);
-        slf.state.steps_remaining = steps_remaining;
-        slf.state.rows_yielded = 0;
+        slf.state
+            .new_iteration(seed, buffer, steps_remaining, cursor.rows_epoch_start);
 
         slf
     }
@@ -236,7 +253,6 @@ impl DataLoader {
         Ok(Checkpoint::from_state(
             &self.state,
             self.shuffle,
-            self.epoch_seed(),
             self.dataset.identifier,
             &self.dataset.row_group_index,
         ))

@@ -341,3 +341,35 @@ def test_resume_after_full_consumption(parquet_path):
     new_loader = DataLoader(ds, batch_size=128, num_steps=5)
     new_loader.load_state_dict(state)
     assert len(list(new_loader)) == 0
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_resume_from_checkpoint_twice(parquet_path, shuffle):
+    args = {
+        "dataset": Dataset([parquet_path], columns=["id"]),
+        "batch_size": 512,
+        "num_steps": 10,
+        "shuffle": shuffle,
+        "seed": 42,
+    }
+
+    # complete uninterrupted run used as reference
+    ref = DataLoader(**args)
+    reference = np.concatenate([b["id"] for b in ref])
+
+    # interrupted run: 3 steps, checkpoint, resume
+    loader = DataLoader(**args)
+    it = iter(loader)
+    first = np.concatenate([next(it)["id"] for _ in range(3)])
+
+    first_resume = DataLoader(**args)
+    first_resume.load_state_dict(loader.state_dict())
+    it = iter(first_resume)
+    second = np.concatenate([next(it)["id"] for _ in range(3)])
+
+    # resume again from the middle of the resumed run
+    second_resume = DataLoader(**args)
+    second_resume.load_state_dict(first_resume.state_dict())
+    third = np.concatenate([b["id"] for b in second_resume])
+
+    assert np.array_equal(np.concatenate([first, second, third]), reference)
