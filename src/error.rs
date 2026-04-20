@@ -78,7 +78,7 @@ pub enum Error {
     DatasetMismatch { checkpoint: u64, current: u64 },
 
     #[error("missing key in checkpoint: '{0}'")]
-    MissingKeyInCheckpoint(String),
+    MissingKeyInPyDict(String),
 
     #[error("invalid checkpoint format: {0}")]
     InvalidCheckpointFormat(String),
@@ -95,7 +95,7 @@ impl From<Error> for PyErr {
             return inner;
         }
         match &e {
-            Error::ColumnNotFound { .. } | Error::MissingKeyInCheckpoint(_) => {
+            Error::ColumnNotFound { .. } | Error::MissingKeyInPyDict(_) => {
                 PyKeyError::new_err(e.to_string())
             }
             Error::DataLoaderConsumed => PyStopIteration::new_err(e.to_string()),

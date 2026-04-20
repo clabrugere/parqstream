@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyType};
+use pyo3::types::{PyDict, PyDictMethods, PyType};
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -9,11 +9,19 @@ use crate::dataloader::DataLoaderState;
 use crate::dataset::RowGroupMeta;
 use crate::error::{Error, Result};
 
+fn pydict_get<'py, T>(dict: &Bound<'py, PyDict>, key: &str) -> Result<T>
+where
+    for<'a> T: FromPyObject<'a, 'py, Error = PyErr>,
+{
+    dict.get_item(key)?
+        .ok_or_else(|| Error::MissingKeyInPyDict(key.into()))
+        .and_then(|v| Ok(v.extract::<T>()?))
+}
+
 /// Position within the infinite row-group stream, used to resume a `DataLoader`.
 ///
 /// `epoch_offset` + `row_group_offset` locate the feeder's starting row group.
 /// `buffer_seed_offset` and `buffer_offset` locate the starting position within the Buffer.
-#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Default)]
 pub struct Cursor {
     pub epoch_offset: usize,
@@ -24,6 +32,41 @@ pub struct Cursor {
     pub rows_epoch_start: usize, // cumulative baseline; see DataLoaderState::rows_epoch_start
 }
 
+impl<'a, 'py> FromPyObject<'a, 'py> for Cursor {
+    type Error = PyErr;
+
+    fn extract(ob: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let dict = ob
+            .cast::<PyDict>()
+            .map_err(|_| Error::InvalidCheckpointFormat("'cursor' must be a dict".into()))?;
+        Ok(Cursor {
+            epoch_offset: pydict_get(&dict, "epoch_offset")?,
+            row_group_offset: pydict_get(&dict, "row_group_offset")?,
+            intra_row_group_offset: pydict_get(&dict, "intra_row_group_offset")?,
+            buffer_seed_offset: pydict_get(&dict, "buffer_seed_offset")?,
+            buffer_offset: pydict_get(&dict, "buffer_offset")?,
+            rows_epoch_start: pydict_get(&dict, "rows_epoch_start")?,
+        })
+    }
+}
+
+impl<'py> IntoPyObject<'py> for &Cursor {
+    type Target = PyDict;
+    type Output = Bound<'py, PyDict>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        let dict = PyDict::new(py);
+        dict.set_item("epoch_offset", self.epoch_offset)?;
+        dict.set_item("row_group_offset", self.row_group_offset)?;
+        dict.set_item("intra_row_group_offset", self.intra_row_group_offset)?;
+        dict.set_item("buffer_seed_offset", self.buffer_seed_offset)?;
+        dict.set_item("buffer_offset", self.buffer_offset)?;
+        dict.set_item("rows_epoch_start", self.rows_epoch_start)?;
+        Ok(dict)
+    }
+}
+
 #[pyclass(from_py_object)]
 #[derive(Debug, Clone)]
 pub struct Checkpoint {
@@ -32,6 +75,22 @@ pub struct Checkpoint {
     pub epoch: usize,
     pub steps_remaining: Option<usize>,
     pub cursor: Cursor,
+}
+
+impl<'py> IntoPyObject<'py> for &Checkpoint {
+    type Target = PyDict;
+    type Output = Bound<'py, PyDict>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        let dict = PyDict::new(py);
+        dict.set_item("seed", self.seed)?;
+        dict.set_item("dataset_identifier", self.dataset_identifier)?;
+        dict.set_item("epoch", self.epoch)?;
+        dict.set_item("steps_remaining", self.steps_remaining)?;
+        dict.set_item("cursor", &self.cursor)?;
+        Ok(dict)
+    }
 }
 
 impl Checkpoint {
@@ -113,7 +172,6 @@ impl Checkpoint {
             .buffer
             .as_ref()
             .map_or(BufferSnapshot::default(), Buffer::snapshot);
-
         let cursor = Self::resolve_cursor(state, shuffle, row_group_index, &buffer_snapshot);
 
         Self {
@@ -129,78 +187,17 @@ impl Checkpoint {
 #[pymethods]
 impl Checkpoint {
     pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let cursor = PyDict::new(py);
-        cursor.set_item("epoch_offset", self.cursor.epoch_offset)?;
-        cursor.set_item("row_group_offset", self.cursor.row_group_offset)?;
-        cursor.set_item("intra_row_group_offset", self.cursor.intra_row_group_offset)?;
-        cursor.set_item("buffer_seed_offset", self.cursor.buffer_seed_offset)?;
-        cursor.set_item("buffer_offset", self.cursor.buffer_offset)?;
-        cursor.set_item("rows_epoch_start", self.cursor.rows_epoch_start)?;
-
-        let dict = PyDict::new(py);
-        dict.set_item("seed", self.seed)?;
-        dict.set_item("dataset_identifier", self.dataset_identifier)?;
-        dict.set_item("epoch", self.epoch)?;
-        dict.set_item("steps_remaining", self.steps_remaining)?;
-        dict.set_item("cursor", cursor)?;
-
-        Ok(dict)
+        self.into_pyobject(py)
     }
 
     #[classmethod]
     pub fn from_dict(_cls: &Bound<'_, PyType>, dict: &Bound<'_, PyDict>) -> Result<Self> {
-        let missing = |key: &str| Error::MissingKeyInCheckpoint(key.into());
-
-        let cursor_obj = dict.get_item("cursor")?.ok_or_else(|| missing("cursor"))?;
-        let cursor_dict = cursor_obj
-            .cast::<PyDict>()
-            .map_err(|_| Error::InvalidCheckpointFormat("'cursor' must be a dict".into()))?;
-
-        let cursor = Cursor {
-            epoch_offset: cursor_dict
-                .get_item("epoch_offset")?
-                .ok_or_else(|| missing("cursor.epoch_offset"))?
-                .extract::<usize>()?,
-            row_group_offset: cursor_dict
-                .get_item("row_group_offset")?
-                .ok_or_else(|| missing("cursor.row_group_offset"))?
-                .extract::<usize>()?,
-            intra_row_group_offset: cursor_dict
-                .get_item("intra_row_group_offset")?
-                .ok_or_else(|| missing("cursor.intra_row_group_offset"))?
-                .extract::<usize>()?,
-            buffer_seed_offset: cursor_dict
-                .get_item("buffer_seed_offset")?
-                .ok_or_else(|| missing("cursor.buffer_seed_offset"))?
-                .extract::<usize>()?,
-            buffer_offset: cursor_dict
-                .get_item("buffer_offset")?
-                .ok_or_else(|| missing("cursor.buffer_offset"))?
-                .extract::<usize>()?,
-            rows_epoch_start: cursor_dict
-                .get_item("rows_epoch_start")?
-                .ok_or_else(|| missing("cursor.rows_epoch_start"))?
-                .extract::<usize>()?,
-        };
-
         Ok(Self {
-            seed: dict
-                .get_item("seed")?
-                .ok_or_else(|| missing("seed"))?
-                .extract::<u64>()?,
-            dataset_identifier: dict
-                .get_item("dataset_identifier")?
-                .ok_or_else(|| missing("dataset_identifier"))?
-                .extract::<u64>()?,
-            epoch: dict
-                .get_item("epoch")?
-                .ok_or_else(|| missing("epoch"))?
-                .extract::<usize>()?,
-            steps_remaining: dict
-                .get_item("steps_remaining")?
-                .ok_or_else(|| missing("steps_remaining"))?
-                .extract::<Option<usize>>()?,
-            cursor,
+            seed: pydict_get(dict, "seed")?,
+            dataset_identifier: pydict_get(dict, "dataset_identifier")?,
+            epoch: pydict_get(dict, "epoch")?,
+            steps_remaining: pydict_get(dict, "steps_remaining")?,
+            cursor: pydict_get(dict, "cursor")?,
         })
     }
 
