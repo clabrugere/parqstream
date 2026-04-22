@@ -33,7 +33,7 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    fn from_pydict<'py>(dict: &Bound<'py, PyDict>) -> Result<Self> {
+    fn from_pydict(dict: &Bound<'_, PyDict>) -> Result<Self> {
         Ok(Cursor {
             epoch_offset: pydict_get(dict, "epoch_offset")?,
             row_group_offset: pydict_get(dict, "row_group_offset")?,

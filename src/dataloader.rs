@@ -171,7 +171,7 @@ impl DataLoader {
         }
 
         let available_cores = thread::available_parallelism()
-            .map_err(|e| Error::ParallelismUnavailable(e))?
+            .map_err(Error::ParallelismUnavailable)?
             .get();
         let seed = seed.unwrap_or_else(rand::random);
         Ok(Self {
@@ -238,7 +238,7 @@ impl DataLoader {
                 Ok(Batch::new(batch))
             }
             Ok(None) => Err(Error::DataLoaderConsumed),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e),
         }
     }
 
