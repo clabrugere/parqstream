@@ -153,24 +153,26 @@ impl DataLoader {
         prefetch_factor: usize,
         buffer_size: Option<usize>,
         seed: Option<u64>,
-    ) -> PyResult<Self> {
+    ) -> Result<Self> {
         if batch_size == 0 {
-            return Err(Error::InvalidBatchSize(batch_size).into());
+            return Err(Error::InvalidBatchSize(batch_size));
         }
         if num_steps == Some(0) {
-            return Err(Error::InvalidNumSteps(0).into());
+            return Err(Error::InvalidNumSteps(0));
         }
         if num_workers == 0 {
-            return Err(Error::InvalidNumWorkers(0).into());
+            return Err(Error::InvalidNumWorkers(0));
         }
         if prefetch_factor == 0 {
-            return Err(Error::InvalidPrefetchFactor(0).into());
+            return Err(Error::InvalidPrefetchFactor(0));
         }
         if buffer_size.is_some_and(|bs| bs < batch_size) {
-            return Err(Error::InvalidBufferSize(buffer_size.unwrap()).into());
+            return Err(Error::InvalidBufferSize(buffer_size.unwrap()));
         }
 
-        let available_cores = thread::available_parallelism()?.get();
+        let available_cores = thread::available_parallelism()
+            .map_err(|e| Error::ParallelismUnavailable(e))?
+            .get();
         let seed = seed.unwrap_or_else(rand::random);
         Ok(Self {
             dataset: Arc::new(dataset.clone()),
@@ -217,15 +219,15 @@ impl DataLoader {
     }
 
     /// Return the next `Batch`, or raise `StopIteration` when the pipeline is exhausted.
-    pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Batch> {
+    pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> Result<Batch> {
         let batch_size = slf.batch_size;
         let state = &mut slf.state;
 
         let Some(buffer) = state.buffer.as_mut() else {
-            return Err(Error::IterationNotStarted.into());
+            return Err(Error::IterationNotStarted);
         };
         if state.steps_remaining == Some(0) {
-            return Err(Error::DataLoaderConsumed.into());
+            return Err(Error::DataLoaderConsumed);
         }
         match buffer.take(batch_size, py) {
             Ok(Some(batch)) => {
@@ -235,15 +237,15 @@ impl DataLoader {
                 state.rows_yielded += batch.num_rows();
                 Ok(Batch::new(batch))
             }
-            Ok(None) => Err(Error::DataLoaderConsumed.into()),
+            Ok(None) => Err(Error::DataLoaderConsumed),
             Err(e) => Err(e.into()),
         }
     }
 
-    pub fn checkpoint(&self) -> PyResult<Checkpoint> {
+    pub fn checkpoint(&self) -> Result<Checkpoint> {
         // check if __iter__ has been called at least once
         if self.state.buffer.is_none() {
-            return Err(Error::NoStateToCheckpoint.into());
+            return Err(Error::NoStateToCheckpoint);
         }
         // if a checkpoint is already stored and hasn't been consumed by __iter__, return it directly
         if let Some(checkpoint) = &self.checkpoint {
@@ -263,21 +265,20 @@ impl DataLoader {
     /// The checkpoint's `steps_remaining` overrides the loader's `num_steps` for
     /// the resumed iteration; this is intentional so that the run ends at exactly
     /// the same total number of batches as the original run.
-    pub fn load_checkpoint(&mut self, checkpoint: Checkpoint) -> PyResult<()> {
+    pub fn load_checkpoint(&mut self, checkpoint: Checkpoint) -> Result<()> {
         if checkpoint.dataset_identifier != self.dataset.identifier {
             return Err(Error::DatasetMismatch {
                 checkpoint: checkpoint.dataset_identifier,
                 current: self.dataset.identifier,
-            }
-            .into());
+            });
         }
         self.state.epoch = checkpoint.epoch;
         self.checkpoint = Some(checkpoint);
         Ok(())
     }
 
-    pub fn __len__(&self) -> PyResult<usize> {
-        self.num_steps.ok_or_else(|| Error::UndefinedLength.into())
+    pub fn __len__(&self) -> Result<usize> {
+        self.num_steps.ok_or_else(|| Error::UndefinedLength)
     }
 
     pub fn __repr__(&self) -> String {

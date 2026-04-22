@@ -244,7 +244,7 @@ impl Dataset {
         paths,
         columns = None,
     ))]
-    pub fn py_new(paths: Vec<String>, columns: Option<Vec<String>>) -> PyResult<Self> {
+    pub fn py_new(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
         Ok(Self::new(paths, columns)?)
     }
 

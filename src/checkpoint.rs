@@ -32,6 +32,19 @@ pub struct Cursor {
     pub rows_epoch_start: usize, // cumulative baseline; see DataLoaderState::rows_epoch_start
 }
 
+impl Cursor {
+    fn from_pydict<'py>(dict: &Bound<'py, PyDict>) -> Result<Self> {
+        Ok(Cursor {
+            epoch_offset: pydict_get(dict, "epoch_offset")?,
+            row_group_offset: pydict_get(dict, "row_group_offset")?,
+            intra_row_group_offset: pydict_get(dict, "intra_row_group_offset")?,
+            buffer_seed_offset: pydict_get(dict, "buffer_seed_offset")?,
+            buffer_offset: pydict_get(dict, "buffer_offset")?,
+            rows_epoch_start: pydict_get(dict, "rows_epoch_start")?,
+        })
+    }
+}
+
 impl<'a, 'py> FromPyObject<'a, 'py> for Cursor {
     type Error = PyErr;
 
@@ -39,14 +52,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Cursor {
         let dict = ob
             .cast::<PyDict>()
             .map_err(|_| Error::InvalidCheckpointFormat("'cursor' must be a dict".into()))?;
-        Ok(Cursor {
-            epoch_offset: pydict_get(&dict, "epoch_offset")?,
-            row_group_offset: pydict_get(&dict, "row_group_offset")?,
-            intra_row_group_offset: pydict_get(&dict, "intra_row_group_offset")?,
-            buffer_seed_offset: pydict_get(&dict, "buffer_seed_offset")?,
-            buffer_offset: pydict_get(&dict, "buffer_offset")?,
-            rows_epoch_start: pydict_get(&dict, "rows_epoch_start")?,
-        })
+        Ok(Cursor::from_pydict(&dict)?)
     }
 }
 

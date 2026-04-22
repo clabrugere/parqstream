@@ -65,6 +65,9 @@ pub enum Error {
     #[error("buffer_size must be >= batch_size, got {0}")]
     InvalidBufferSize(usize),
 
+    #[error(transparent)]
+    ParallelismUnavailable(#[from] IoError),
+
     #[error("iteration not started, call iter(loader) before next(loader)")]
     IterationNotStarted,
 
