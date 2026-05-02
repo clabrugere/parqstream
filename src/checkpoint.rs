@@ -111,17 +111,6 @@ impl Cursor {
             rows_epoch_start,
         }
     }
-
-    fn from_pydict(dict: &Bound<'_, PyDict>) -> Result<Self> {
-        Ok(Cursor {
-            epoch_offset: pydict_get(dict, "epoch_offset")?,
-            row_group_offset: pydict_get(dict, "row_group_offset")?,
-            intra_row_group_offset: pydict_get(dict, "intra_row_group_offset")?,
-            buffer_seed_offset: pydict_get(dict, "buffer_seed_offset")?,
-            buffer_offset: pydict_get(dict, "buffer_offset")?,
-            rows_epoch_start: pydict_get(dict, "rows_epoch_start")?,
-        })
-    }
 }
 
 impl<'a, 'py> FromPyObject<'a, 'py> for Cursor {
@@ -131,7 +120,15 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Cursor {
         let dict = ob
             .cast::<PyDict>()
             .map_err(|_| Error::InvalidCheckpointFormat("'cursor' must be a dict".into()))?;
-        Ok(Cursor::from_pydict(&dict)?)
+        let cursor = Cursor {
+            epoch_offset: pydict_get(&dict, "epoch_offset")?,
+            row_group_offset: pydict_get(&dict, "row_group_offset")?,
+            intra_row_group_offset: pydict_get(&dict, "intra_row_group_offset")?,
+            buffer_seed_offset: pydict_get(&dict, "buffer_seed_offset")?,
+            buffer_offset: pydict_get(&dict, "buffer_offset")?,
+            rows_epoch_start: pydict_get(&dict, "rows_epoch_start")?,
+        };
+        Ok(cursor)
     }
 }
 
