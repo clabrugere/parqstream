@@ -155,7 +155,7 @@ impl Dataset {
     }
 
     /// Construct a single logical dataset from `paths`, while validating that all files share the same schema.
-    pub fn new(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
+    pub fn from_paths(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
         let mut files = Vec::with_capacity(paths.len());
         let mut paths = paths.into_iter().enumerate();
 
@@ -244,8 +244,8 @@ impl Dataset {
         paths,
         columns = None,
     ))]
-    pub fn py_new(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
-        Self::new(paths, columns)
+    pub fn new(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
+        Self::from_paths(paths, columns)
     }
 
     #[getter]
