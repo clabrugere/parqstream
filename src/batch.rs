@@ -9,6 +9,7 @@ use pyo3::types::PyCapsule;
 
 use crate::error::{Error, Result};
 
+/// A slice of rows returned by the `DataLoader`, backed by an Arrow `RecordBatch`.
 #[pyclass]
 pub struct Batch {
     data: RecordBatch,
@@ -20,6 +21,7 @@ impl Batch {
     }
 }
 
+/// A single named column from a [`Batch`], backed by an Arrow array.
 #[pyclass]
 pub struct Column {
     array: Arc<dyn Array>,
@@ -34,6 +36,7 @@ impl Column {
 
 #[pymethods]
 impl Batch {
+    /// Returns all columns in schema order.
     fn columns(&self) -> Vec<Column> {
         self.data
             .columns()
@@ -43,6 +46,7 @@ impl Batch {
             .collect()
     }
 
+    /// Returns the column with the given name. Raises `KeyError` if absent.
     fn column(&self, name: &str) -> Result<Column> {
         let array = self
             .data
@@ -51,6 +55,7 @@ impl Batch {
         Ok(Column::new(array.clone(), name.to_string()))
     }
 
+    /// Exports the batch via the Arrow `PyCapsule` Interface (`__arrow_c_stream__`).
     fn __arrow_c_stream__<'py>(
         &self,
         py: Python<'py>,

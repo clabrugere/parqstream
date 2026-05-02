@@ -95,6 +95,7 @@ pub struct RowGroupMeta {
     pub num_rows: usize,
 }
 
+/// Parquet file handle with eagerly-loaded footer metadata.
 #[derive(Debug, Clone)]
 pub struct ParquetFile {
     pub path: PathBuf,
@@ -102,7 +103,7 @@ pub struct ParquetFile {
 }
 
 impl ParquetFile {
-    /// Load arrow metadata from a parquet file, returning an error if the file cannot be opened or read.
+    /// Opens the file and loads footer metadata only; no row data is read.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path).map_err(|e| Error::OpenFile {
@@ -142,8 +143,8 @@ impl ParquetFile {
     }
 }
 
-/// Reads only footer metadata at construction time, no data is loaded until `read_batch` is called.
-/// `RowGroupIndex` flattens the parquet files to allow for random row access in the whole dataset
+/// Logical view over one or more Parquet files with a shared schema. Footer metadata is loaded at
+/// construction; row data is read on demand via [`Dataset::read_row_group_range`].
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct Dataset {
@@ -166,7 +167,6 @@ impl Dataset {
         let (_, first_path) = paths.next().ok_or(Error::EmptyPaths)?;
         let parquet_file = ParquetFile::load(&first_path)?;
 
-        // resolve column names to indices and build projected schema and projection mask
         let (projected_schema, projection, columns) = build_projection(&parquet_file, columns)?;
 
         files.push(parquet_file);
@@ -183,7 +183,6 @@ impl Dataset {
         // Index row groups across all files
         let (row_group_index, total_rows) = build_row_group_index(&files)?;
 
-        // compute dataset identifier
         let identifier = hash_dataset(
             files.iter().map(|f| f.path.clone()),
             &columns,
@@ -202,6 +201,8 @@ impl Dataset {
         })
     }
 
+    /// Reads `len` rows from `row_group_idx` in `file_idx`, skipping the first `start` rows,
+    /// and returns a projected `RecordBatch`.
     pub fn read_row_group_range(
         &self,
         file_idx: usize,
@@ -213,7 +214,7 @@ impl Dataset {
         let path = parquet_file.path.clone();
         let file = File::open(&path).map_err(|e| Error::OpenFile { path, source: e })?;
 
-        // skip first `start`rows and read `len` following rows
+        // Skip first `start` rows and read `len` following rows
         let mut selectors = Vec::with_capacity(2);
         if start > 0 {
             selectors.push(RowSelector::skip(start));

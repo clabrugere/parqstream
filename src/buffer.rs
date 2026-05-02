@@ -11,7 +11,7 @@ use rand::{Rng, SeedableRng};
 
 use crate::error::Result;
 
-/// Shuffle of all rows in `buffer`.
+/// Returns a copy of `buffer` with all rows randomly permuted using `rng`.
 pub fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<RecordBatch> {
     let n = u32::try_from(buffer.num_rows())?;
     let mut indices = (0..n).collect::<Vec<_>>();
@@ -27,6 +27,7 @@ pub fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<Record
     Ok(RecordBatch::try_new(buffer.schema(), columns)?)
 }
 
+/// Point-in-time view of a [`Buffer`], used by checkpoint to reconstruct the resume position.
 #[derive(Debug, Default)]
 pub struct BufferSnapshot {
     pub offset: usize,
@@ -36,6 +37,8 @@ pub struct BufferSnapshot {
     pub tail_size: usize,
 }
 
+/// Wraps the prefetch receiver and serves row slices of a requested size. Each fill is optionally
+/// shuffled; unconsumed rows from the previous fill are stitched to the front of the next.
 #[derive(Debug)]
 pub struct Buffer {
     prefetch_rx: Receiver<Result<RecordBatch>>,
@@ -86,9 +89,8 @@ impl Buffer {
             .is_none_or(|batch| self.offset + num_rows > batch.num_rows())
     }
 
-    // Fetch the next fill from the channel. Any unconsumed rows from the current buffer are
-    // prepended (stitched) so batches never straddle a fill boundary with a gap. The stitched
-    // tail retains its previous shuffle; only the fresh data is shuffled with the new seed.
+    /// Fetches the next fill, prepending any unconsumed tail from the previous fill. The tail keeps
+    /// its previous shuffle order; only the fresh data is shuffled with the new seed.
     fn refill(&mut self, py: Python<'_>) -> Result<bool> {
         let remaining_rows = self.data.as_ref().and_then(|data| {
             (self.offset < data.num_rows())
@@ -118,6 +120,7 @@ impl Buffer {
         }
     }
 
+    /// Returns the next `num_rows` rows, triggering a refill if needed. Returns `None` when the channel is closed.
     pub fn take(&mut self, num_rows: usize, py: Python<'_>) -> Result<Option<RecordBatch>> {
         if self.need_refill(num_rows) && !self.refill(py)? {
             return Ok(None);
@@ -130,6 +133,7 @@ impl Buffer {
         Ok(Some(batch))
     }
 
+    /// Captures the current offset, seed state, and tail size for use in a [`BufferSnapshot`].
     pub fn snapshot(&self) -> BufferSnapshot {
         BufferSnapshot {
             offset: self.offset,

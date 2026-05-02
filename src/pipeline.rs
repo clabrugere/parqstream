@@ -10,6 +10,7 @@ use crate::checkpoint::Cursor;
 use crate::dataset::Dataset;
 use crate::error::Result;
 
+/// Tracks the dispatcher's position within the infinite epoch/row-group stream.
 #[allow(clippy::struct_field_names)]
 #[derive(Debug)]
 pub struct EpochCursor {
@@ -19,6 +20,7 @@ pub struct EpochCursor {
 }
 
 impl EpochCursor {
+    /// Advances past `num_rows`, rolling over to the next row group when the current one is exhausted.
     pub fn advance(&mut self, num_rows: usize, row_group_length: usize) {
         self.intra_row_group_offset += num_rows;
         if self.intra_row_group_offset >= row_group_length {
@@ -26,6 +28,7 @@ impl EpochCursor {
             self.intra_row_group_offset = 0;
         }
     }
+    /// Resets to the start of the next epoch.
     pub fn new_epoch(&mut self) {
         self.epoch_offset += 1;
         self.row_group_offset = 0;
@@ -43,6 +46,7 @@ impl From<&Cursor> for EpochCursor {
     }
 }
 
+/// A read task: a contiguous slice of `num_rows` rows at `start_row` within a single row group.
 #[derive(Debug)]
 pub struct Chunk {
     pub row_group_idx: usize,
@@ -50,7 +54,8 @@ pub struct Chunk {
     pub num_rows: usize,
 }
 
-// continuously sends row group read tasks to the chunk channel, shuffled if needed
+/// Emits read tasks to `chunk_tx` indefinitely, cycling through row groups epoch by epoch and
+/// shuffling each epoch's visit order if enabled.
 pub fn chunk_dispatcher(
     chunk_tx: &Sender<Chunk>,
     row_group_lengths: &[usize],
@@ -61,7 +66,7 @@ pub fn chunk_dispatcher(
 ) {
     let num_groups = row_group_lengths.len();
     // Row group visit order for the current epoch. Shuffle seed = seed + epoch_offset so
-    // each epoch gets an independent, deterministic order (matches resolve_cursor in checkpoint.rs).
+    // each epoch gets an independent, deterministic order (mirrors locate_row_in_order in checkpoint.rs).
     let mut order = (0..num_groups).collect::<Vec<_>>();
     if shuffle {
         order.shuffle(&mut SmallRng::seed_from_u64(
@@ -99,7 +104,7 @@ pub fn chunk_dispatcher(
     }
 }
 
-// reads chunks received from the chunk channel, gather rows and sends record batches to the batch channel
+/// Reads each `Chunk` from disk and forwards the resulting `RecordBatch` to `batch_tx`.
 pub fn chunk_reader(
     chunk_rx: &Receiver<Chunk>,
     batch_tx: &Sender<Result<RecordBatch>>,
@@ -126,7 +131,8 @@ pub fn chunk_reader(
     }
 }
 
-// continuously collects chunks until > buffer_size rows, concatenates and sends to batch channel
+/// Accumulates batches from `batch_rx` until `buffer_size` rows are gathered, concatenates them
+/// into one fill, and sends it to `prefetch_tx`.
 pub fn chunk_collector(
     batch_rx: &Receiver<Result<RecordBatch>>,
     prefetch_tx: &Sender<Result<RecordBatch>>,

@@ -238,6 +238,7 @@ impl DataLoader {
         }
     }
 
+    /// Returns the current position as a [`Checkpoint`]. Errors if the iterator has not been started.
     pub fn checkpoint(&self) -> Result<Checkpoint> {
         // check if __iter__ has been called at least once
         if self.state.buffer.is_none() {

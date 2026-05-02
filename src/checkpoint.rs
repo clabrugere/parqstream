@@ -25,7 +25,7 @@ fn locate_row_in_order(
     row_group_index: &[RowGroupMeta],
     rows: usize,
 ) -> (usize, usize) {
-    // Reconstruct the row group visit order for this epoch, mirroring chunk_feeder's logic:
+    // Reconstruct the row group visit order for this epoch, mirroring chunk_dispatcher's logic:
     // always shuffle [0..N) so each epoch's order is independent of the previous one.
     let mut order: Vec<usize> = (0..row_group_index.len()).collect();
     if shuffle {
@@ -64,6 +64,7 @@ pub struct Cursor {
 }
 
 impl Cursor {
+    /// Derives the resume position from the current iteration state and a buffer snapshot.
     fn from_state(
         state: &DataLoaderState,
         shuffle: bool,
@@ -77,7 +78,7 @@ impl Cursor {
         let rows_epoch_start = state.rows_epoch_start + state.rows_yielded;
         let rows_at_buffer_start = rows_epoch_start - buffer_snapshot.offset;
 
-        // On resume, data=None so no tail is stitched. Shift the feeder to the fresh-epoch
+        // On resume, data=None so no tail is stitched. Shift the feeder to the fresh-fill
         // start and correct buffer_offset by -tail_size so resume_offset lands at the right spot.
         // If buffer_offset < tail_size (cursor is mid-tail), fall back to the tail-start position.
         let buffer_offset = buffer_snapshot.offset;
@@ -95,7 +96,7 @@ impl Cursor {
         // Buffer::new starts with the value it had before that refill fired.
         let buffer_seed_offset = buffer_snapshot.seed_offset.saturating_sub(1);
 
-        // locate the feeder's row group by walking the ordered row groups until we find the one
+        // Locate the feeder's row group by walking the ordered visit sequence until we find the one containing `epoch_rows`
         let epoch_offset = epoch_rows / total_rows;
         let rows = epoch_rows % total_rows;
         let seed = state.iteration_seed + epoch_offset as u64;
@@ -149,6 +150,7 @@ impl<'py> IntoPyObject<'py> for &Cursor {
     }
 }
 
+/// Serializable snapshot of a `DataLoader` mid-run, sufficient to resume from the exact same position.
 #[pyclass(from_py_object)]
 #[derive(Debug, Clone)]
 pub struct Checkpoint {
@@ -176,6 +178,7 @@ impl<'py> IntoPyObject<'py> for &Checkpoint {
 }
 
 impl Checkpoint {
+    /// Builds a `Checkpoint` from the current `DataLoader` state.
     pub fn from_state(
         state: &DataLoaderState,
         shuffle: bool,
@@ -200,10 +203,12 @@ impl Checkpoint {
 
 #[pymethods]
 impl Checkpoint {
+    /// Serializes to a Python dict. The result can be restored via [`Checkpoint::from_dict`].
     pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         self.into_pyobject(py)
     }
 
+    /// Deserializes a checkpoint from a dict produced by [`Checkpoint::to_dict`].
     #[classmethod]
     pub fn from_dict(_cls: &Bound<'_, PyType>, dict: &Bound<'_, PyDict>) -> Result<Self> {
         Ok(Self {

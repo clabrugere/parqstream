@@ -8,6 +8,7 @@ use parquet::errors::ParquetError;
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyStopIteration, PyTypeError, PyValueError};
 use pyo3::PyErr;
 
+/// All errors produced by this crate, mapped to the appropriate Python exception type on conversion.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("at least one file path is required")]
