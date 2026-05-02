@@ -6,12 +6,13 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
+use crate::checkpoint::Cursor;
 use crate::dataset::Dataset;
 use crate::error::Result;
 
 #[allow(clippy::struct_field_names)]
 #[derive(Debug)]
-struct EpochCursor {
+pub struct EpochCursor {
     pub epoch_offset: usize,
     pub row_group_offset: usize,
     pub intra_row_group_offset: usize,
@@ -32,6 +33,16 @@ impl EpochCursor {
     }
 }
 
+impl From<&Cursor> for EpochCursor {
+    fn from(cursor: &Cursor) -> Self {
+        Self {
+            epoch_offset: cursor.epoch_offset,
+            row_group_offset: cursor.row_group_offset,
+            intra_row_group_offset: cursor.intra_row_group_offset,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Chunk {
     pub row_group_idx: usize,
@@ -40,23 +51,14 @@ pub struct Chunk {
 }
 
 // continuously sends row group read tasks to the chunk channel, shuffled if needed
-#[allow(clippy::too_many_arguments)]
 pub fn chunk_dispatcher(
     chunk_tx: &Sender<Chunk>,
     row_group_lengths: &[usize],
     chunk_size: usize,
     shuffle: bool,
     seed: u64,
-    epoch_offset: usize,
-    row_group_offset: usize,
-    intra_row_group_offset: usize,
+    mut cursor: EpochCursor,
 ) {
-    let mut cursor = EpochCursor {
-        epoch_offset,
-        row_group_offset,
-        intra_row_group_offset,
-    };
-
     let num_groups = row_group_lengths.len();
     // Row group visit order for the current epoch. Shuffle seed = seed + epoch_offset so
     // each epoch gets an independent, deterministic order (matches resolve_cursor in checkpoint.rs).

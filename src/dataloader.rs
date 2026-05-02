@@ -10,7 +10,7 @@ use crate::buffer::Buffer;
 use crate::checkpoint::{Checkpoint, Cursor};
 use crate::dataset::Dataset;
 use crate::error::{Error, Result};
-use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk};
+use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk, EpochCursor};
 
 /// Stores the state of a Dataloader, which can be serialized to a Checkpoint for saving and resuming later
 #[derive(Debug, Default)]
@@ -97,9 +97,7 @@ impl DataLoader {
         let (prefetch_tx, prefetch_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
         // chunk feeder sending row group read tasks to workers
-        let epoch_offset = cursor.epoch_offset;
-        let row_group_offset = cursor.row_group_offset;
-        let intra_row_group_offset = cursor.intra_row_group_offset;
+        let cursor = EpochCursor::from(cursor);
         thread::spawn(move || {
             chunk_dispatcher(
                 &chunk_tx,
@@ -107,9 +105,7 @@ impl DataLoader {
                 chunk_size,
                 shuffle,
                 seed,
-                epoch_offset,
-                row_group_offset,
-                intra_row_group_offset,
+                cursor,
             );
         });
 
