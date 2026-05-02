@@ -64,7 +64,7 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    fn new(
+    fn from_state(
         state: &DataLoaderState,
         shuffle: bool,
         row_group_index: &[RowGroupMeta],
@@ -186,7 +186,7 @@ impl Checkpoint {
             .buffer
             .as_ref()
             .map_or(BufferSnapshot::default(), Buffer::snapshot);
-        let cursor = Cursor::new(state, shuffle, row_group_index, &buffer_snapshot);
+        let cursor = Cursor::from_state(state, shuffle, row_group_index, &buffer_snapshot);
 
         Self {
             seed: state.iteration_seed,
