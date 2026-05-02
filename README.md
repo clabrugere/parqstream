@@ -27,7 +27,7 @@ The fill channel has capacity `prefetch_factor`, so the next fill can be prepare
 
 Columns are transferred to Python via Arrow PyCapsule — zero-copy for dense numeric columns, one copy for nullable or string columns.
 
-**`Checkpoint`** — opaque object returned by `DataLoader.checkpoint()` that captures the exact iteration position (epoch, row-group offset, buffer offset, steps remaining). Supports `to_dict()` / `from_dict()` for serialization.
+**`Checkpoint`** — opaque object returned by `DataLoader.checkpoint()` that captures the exact iteration position (training epoch, stream epoch, row-group position, buffer position, steps remaining). Supports `to_dict()` / `from_dict()` for serialization.
 
 ## Usage
 

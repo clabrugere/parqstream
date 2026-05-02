@@ -7,10 +7,10 @@ use pyo3::prelude::*;
 
 use crate::batch::Batch;
 use crate::buffer::Buffer;
-use crate::checkpoint::{Checkpoint, Cursor};
+use crate::checkpoint::{Checkpoint, CheckpointCursor};
 use crate::dataset::Dataset;
 use crate::error::{Error, Result};
-use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk, EpochCursor};
+use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk, StreamCursor};
 
 /// Stores the state of a Dataloader, which can be serialized to a Checkpoint for saving and resuming later
 #[derive(Debug, Default)]
@@ -76,7 +76,7 @@ impl DataLoader {
     }
 
     /// Spawn the feeder and worker threads and return the batch receiver
-    fn spawn_pipeline(&self, seed: u64, cursor: &Cursor) -> Receiver<Result<RecordBatch>> {
+    fn spawn_pipeline(&self, seed: u64, cursor: &CheckpointCursor) -> Receiver<Result<RecordBatch>> {
         let dataset = self.dataset.clone();
         let buffer_size = self
             .buffer_size
@@ -97,7 +97,7 @@ impl DataLoader {
         let (prefetch_tx, prefetch_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
 
         // chunk feeder sending row group read tasks to workers
-        let cursor = EpochCursor::from(cursor);
+        let cursor = StreamCursor::from(cursor);
         thread::spawn(move || {
             chunk_dispatcher(
                 &chunk_tx,
@@ -196,7 +196,7 @@ impl DataLoader {
                 checkpoint.steps_remaining,
                 checkpoint.cursor,
             ),
-            None => (slf.epoch_seed(), slf.num_steps, Cursor::default()),
+            None => (slf.epoch_seed(), slf.num_steps, CheckpointCursor::default()),
         };
 
         let prefetch_rx = slf.spawn_pipeline(seed, &cursor);
@@ -204,7 +204,7 @@ impl DataLoader {
             prefetch_rx,
             slf.shuffle,
             seed,
-            cursor.buffer_seed_offset,
+            cursor.refill_count,
             cursor.buffer_offset,
         );
 

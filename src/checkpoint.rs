@@ -33,37 +33,37 @@ fn locate_row_in_order(
     }
 
     let mut rows = rows;
-    let mut row_group_offset = 0;
-    let mut intra_row_group_offset = 0;
+    let mut row_group = 0;
+    let mut row_in_group = 0;
     // always terminates because rows < total_rows as rows = epoch_rows % total_rows
     for (seq_idx, &rg_idx) in order.iter().enumerate() {
         let row_group_rows = row_group_index[rg_idx].num_rows;
         if rows < row_group_rows {
-            row_group_offset = seq_idx;
-            intra_row_group_offset = rows;
+            row_group = seq_idx;
+            row_in_group = rows;
             break;
         }
         rows -= row_group_rows;
     }
 
-    (row_group_offset, intra_row_group_offset)
+    (row_group, row_in_group)
 }
 
 /// Position within the infinite row-group stream, used to resume a `DataLoader`.
 ///
-/// `epoch_offset` + `row_group_offset` locate the feeder's starting row group.
-/// `buffer_seed_offset` and `buffer_offset` locate the starting position within the Buffer.
+/// `epoch` + `row_group` locate the feeder's starting row group.
+/// `refill_count` and `buffer_offset` locate the starting position within the Buffer.
 #[derive(Debug, Clone, Default)]
-pub struct Cursor {
-    pub epoch_offset: usize,
-    pub row_group_offset: usize,
-    pub intra_row_group_offset: usize,
-    pub buffer_seed_offset: usize,
+pub struct CheckpointCursor {
+    pub stream_epoch: usize, // feeder's pass count, used to seed the shuffle
+    pub row_group: usize,
+    pub row_in_group: usize,
+    pub refill_count: usize,
     pub buffer_offset: usize,
     pub rows_epoch_start: usize, // cumulative baseline; see DataLoaderState::rows_epoch_start
 }
 
-impl Cursor {
+impl CheckpointCursor {
     /// Derives the resume position from the current iteration state and a buffer snapshot.
     fn from_state(
         state: &DataLoaderState,
@@ -94,38 +94,37 @@ impl Cursor {
 
         // The snapshot captures seed_offset after the last increment; subtract 1 so
         // Buffer::new starts with the value it had before that refill fired.
-        let buffer_seed_offset = buffer_snapshot.seed_offset.saturating_sub(1);
+        let refill_count = buffer_snapshot.seed_offset.saturating_sub(1);
 
         // Locate the feeder's row group by walking the ordered visit sequence until we find the one containing `epoch_rows`
-        let epoch_offset = epoch_rows / total_rows;
+        let stream_epoch = epoch_rows / total_rows;
         let rows = epoch_rows % total_rows;
-        let seed = state.iteration_seed + epoch_offset as u64;
-        let (row_group_offset, intra_row_group_offset) =
-            locate_row_in_order(seed, shuffle, row_group_index, rows);
+        let seed = state.iteration_seed + stream_epoch as u64;
+        let (row_group, row_in_group) = locate_row_in_order(seed, shuffle, row_group_index, rows);
 
         Self {
-            epoch_offset,
-            row_group_offset,
-            intra_row_group_offset,
-            buffer_seed_offset,
+            stream_epoch,
+            row_group,
+            row_in_group,
+            refill_count,
             buffer_offset: corrected_buffer_offset,
             rows_epoch_start,
         }
     }
 }
 
-impl<'a, 'py> FromPyObject<'a, 'py> for Cursor {
+impl<'a, 'py> FromPyObject<'a, 'py> for CheckpointCursor {
     type Error = PyErr;
 
     fn extract(ob: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
         let dict = ob
             .cast::<PyDict>()
             .map_err(|_| Error::InvalidCheckpointFormat("'cursor' must be a dict".into()))?;
-        let cursor = Cursor {
-            epoch_offset: pydict_get(&dict, "epoch_offset")?,
-            row_group_offset: pydict_get(&dict, "row_group_offset")?,
-            intra_row_group_offset: pydict_get(&dict, "intra_row_group_offset")?,
-            buffer_seed_offset: pydict_get(&dict, "buffer_seed_offset")?,
+        let cursor = CheckpointCursor {
+            stream_epoch: pydict_get(&dict, "epoch")?,
+            row_group: pydict_get(&dict, "row_group")?,
+            row_in_group: pydict_get(&dict, "row_in_group")?,
+            refill_count: pydict_get(&dict, "refill_count")?,
             buffer_offset: pydict_get(&dict, "buffer_offset")?,
             rows_epoch_start: pydict_get(&dict, "rows_epoch_start")?,
         };
@@ -133,17 +132,17 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Cursor {
     }
 }
 
-impl<'py> IntoPyObject<'py> for &Cursor {
+impl<'py> IntoPyObject<'py> for &CheckpointCursor {
     type Target = PyDict;
     type Output = Bound<'py, PyDict>;
     type Error = PyErr;
 
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
         let dict = PyDict::new(py);
-        dict.set_item("epoch_offset", self.epoch_offset)?;
-        dict.set_item("row_group_offset", self.row_group_offset)?;
-        dict.set_item("intra_row_group_offset", self.intra_row_group_offset)?;
-        dict.set_item("buffer_seed_offset", self.buffer_seed_offset)?;
+        dict.set_item("epoch", self.stream_epoch)?;
+        dict.set_item("row_group", self.row_group)?;
+        dict.set_item("row_in_group", self.row_in_group)?;
+        dict.set_item("refill_count", self.refill_count)?;
         dict.set_item("buffer_offset", self.buffer_offset)?;
         dict.set_item("rows_epoch_start", self.rows_epoch_start)?;
         Ok(dict)
@@ -158,7 +157,7 @@ pub struct Checkpoint {
     pub dataset_identifier: u64,
     pub epoch: usize,
     pub steps_remaining: Option<usize>,
-    pub cursor: Cursor,
+    pub cursor: CheckpointCursor,
 }
 
 impl<'py> IntoPyObject<'py> for &Checkpoint {
@@ -189,7 +188,8 @@ impl Checkpoint {
             .buffer
             .as_ref()
             .map_or(BufferSnapshot::default(), Buffer::snapshot);
-        let cursor = Cursor::from_state(state, shuffle, row_group_index, &buffer_snapshot);
+        let cursor =
+            CheckpointCursor::from_state(state, shuffle, row_group_index, &buffer_snapshot);
 
         Self {
             seed: state.iteration_seed,
@@ -222,12 +222,12 @@ impl Checkpoint {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "Checkpoint(epoch={}, steps_remaining={:?}, cursor={{row_group_offset={}, intra_row_group_offset={}, buffer_seed_offset={}, buffer_offset={}}})",
+            "Checkpoint(epoch={}, steps_remaining={:?}, cursor={{row_group={}, row_in_group={}, refill_count={}, buffer_offset={}}})",
             self.epoch,
             self.steps_remaining,
-            self.cursor.row_group_offset,
-            self.cursor.intra_row_group_offset,
-            self.cursor.buffer_seed_offset,
+            self.cursor.row_group,
+            self.cursor.row_in_group,
+            self.cursor.refill_count,
             self.cursor.buffer_offset,
         )
     }
