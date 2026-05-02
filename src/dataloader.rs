@@ -140,7 +140,7 @@ impl DataLoader {
         seed = None,
     ))]
     #[allow(clippy::too_many_arguments)]
-    pub fn py_new(
+    pub fn new(
         dataset: &Dataset,
         batch_size: usize,
         num_steps: Option<usize>,
