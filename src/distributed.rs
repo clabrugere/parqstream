@@ -2,6 +2,7 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
+use crate::dataloader::ShuffleConfig;
 use crate::dataset::RowGroupMeta;
 
 #[derive(Debug, Clone, Copy)]
@@ -26,14 +27,15 @@ impl DistributedConfig {
     /// retain only this rank's strided positions. `world_size=1` returns all groups unchanged.
     pub fn epoch_order(
         &self,
-        base_seed: u64,
-        shuffle: bool,
+        shuffle_config: ShuffleConfig,
         epoch: usize,
         num_groups: usize,
     ) -> Vec<usize> {
         let mut order: Vec<usize> = (0..num_groups).collect();
-        if shuffle {
-            order.shuffle(&mut SmallRng::seed_from_u64(base_seed + epoch as u64));
+        if shuffle_config.shuffle {
+            order.shuffle(&mut SmallRng::seed_from_u64(
+                shuffle_config.seed + epoch as u64,
+            ));
         }
         if self.world_size == 1 {
             return order;
@@ -48,12 +50,11 @@ impl DistributedConfig {
     /// Total rows this rank processes in the given epoch.
     fn epoch_row_count(
         &self,
-        base_seed: u64,
-        shuffle: bool,
+        shuffle_config: ShuffleConfig,
         epoch: usize,
         rgi: &[RowGroupMeta],
     ) -> usize {
-        self.epoch_order(base_seed, shuffle, epoch, rgi.len())
+        self.epoch_order(shuffle_config, epoch, rgi.len())
             .iter()
             .map(|&i| rgi[i].num_rows)
             .sum()
@@ -67,15 +68,14 @@ impl DistributedConfig {
     /// For `world_size=1`, `epoch_row_count` is the dataset total (invariant), so the loop terminates in one step.
     pub fn locate_epoch(
         &self,
-        base_seed: u64,
-        shuffle: bool,
+        shuffle_config: ShuffleConfig,
         dispatched_rows: usize,
-        rgi: &[RowGroupMeta],
+        row_group_index: &[RowGroupMeta],
     ) -> (usize, usize) {
         let mut remaining = dispatched_rows;
         let mut epoch = 0;
         loop {
-            let epoch_rows = self.epoch_row_count(base_seed, shuffle, epoch, rgi);
+            let epoch_rows = self.epoch_row_count(shuffle_config, epoch, row_group_index);
             if remaining < epoch_rows {
                 break;
             }

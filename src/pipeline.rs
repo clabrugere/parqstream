@@ -4,6 +4,7 @@ use arrow::datatypes::SchemaRef;
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::checkpoint::CheckpointCursor;
+use crate::dataloader::ShuffleConfig;
 use crate::dataset::Dataset;
 use crate::distributed::DistributedConfig;
 use crate::error::Result;
@@ -57,20 +58,19 @@ pub fn chunk_dispatcher(
     chunk_tx: &Sender<Chunk>,
     row_group_lengths: &[usize],
     chunk_size: usize,
-    shuffle: bool,
-    seed: u64,
     mut cursor: StreamCursor,
+    shuffle_config: ShuffleConfig,
     dist_config: DistributedConfig,
 ) {
     let num_global = row_group_lengths.len();
-    let mut order = dist_config.epoch_order(seed, shuffle, cursor.epoch, num_global);
+    let mut order = dist_config.epoch_order(shuffle_config, cursor.epoch, num_global);
     // rank_groups is invariant across epochs: same dataset and same dist_config always produce the same count.
     let rank_groups = order.len();
 
     loop {
         if cursor.row_group >= rank_groups {
             cursor.new_epoch();
-            order = dist_config.epoch_order(seed, shuffle, cursor.epoch, num_global);
+            order = dist_config.epoch_order(shuffle_config, cursor.epoch, num_global);
         }
         let row_group_idx = order[cursor.row_group];
         let row_group_length = row_group_lengths[row_group_idx];

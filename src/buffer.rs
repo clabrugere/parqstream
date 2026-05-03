@@ -9,6 +9,7 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
+use crate::dataloader::ShuffleConfig;
 use crate::error::Result;
 
 /// Returns a copy of `buffer` with all rows randomly permuted using `rng`.
@@ -42,10 +43,9 @@ pub struct BufferSnapshot {
 #[derive(Debug)]
 pub struct Buffer {
     prefetch_rx: Receiver<Result<RecordBatch>>,
-    shuffle: bool,
+    shuffle_config: ShuffleConfig,
     data: Option<RecordBatch>,
     offset: usize,
-    seed: u64,
     /// Incremented after each refill; the nth fill is shuffled with `SmallRng(seed + seed_offset_at_that_fill)`.
     seed_offset: usize,
     /// Applied once on the first refill to skip into a partially-consumed buffer (checkpoint resume).
@@ -57,17 +57,15 @@ pub struct Buffer {
 impl Buffer {
     pub fn new(
         prefetch_rx: Receiver<Result<RecordBatch>>,
-        shuffle: bool,
-        seed: u64,
+        shuffle_config: ShuffleConfig,
         seed_offset: usize,
         resume_offset: usize,
     ) -> Self {
         Self {
             prefetch_rx,
-            shuffle,
+            shuffle_config,
             data: None,
             offset: 0,
-            seed,
             seed_offset,
             resume_offset,
             tail_size: 0,
@@ -75,8 +73,9 @@ impl Buffer {
     }
 
     fn maybe_shuffle(&self, batch: RecordBatch) -> Result<RecordBatch> {
-        if self.shuffle {
-            let mut rng = SmallRng::seed_from_u64(self.seed + self.seed_offset as u64);
+        if self.shuffle_config.shuffle {
+            let mut rng =
+                SmallRng::seed_from_u64(self.shuffle_config.seed + self.seed_offset as u64);
             shuffle_buffer(&batch, &mut rng)
         } else {
             Ok(batch)

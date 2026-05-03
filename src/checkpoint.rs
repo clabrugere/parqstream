@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyDictMethods, PyType};
 
 use crate::buffer::{Buffer, BufferSnapshot};
-use crate::dataloader::DataLoaderState;
+use crate::dataloader::{DataLoaderState, ShuffleConfig};
 use crate::dataset::RowGroupMeta;
 use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
@@ -18,14 +18,13 @@ where
 
 /// Walk the rank-local ordered row groups to find which one contains `rows`.
 fn locate_row_in_order(
-    base_seed: u64,
-    shuffle: bool,
     epoch: usize,
+    shuffle_config: ShuffleConfig,
     dist_config: DistributedConfig,
     row_group_index: &[RowGroupMeta],
     rows: usize,
 ) -> (usize, usize) {
-    let order = dist_config.epoch_order(base_seed, shuffle, epoch, row_group_index.len());
+    let order = dist_config.epoch_order(shuffle_config, epoch, row_group_index.len());
 
     let mut rows = rows;
     let mut row_group = 0;
@@ -62,7 +61,7 @@ impl CheckpointCursor {
     /// Derives the resume position from the current iteration state and a buffer snapshot.
     fn from_state(
         state: &DataLoaderState,
-        shuffle: bool,
+        shuffle_config: ShuffleConfig,
         dist_config: DistributedConfig,
         row_group_index: &[RowGroupMeta],
         buffer_snapshot: &BufferSnapshot,
@@ -92,16 +91,11 @@ impl CheckpointCursor {
 
         // Locate the feeder's epoch and position within it. For world_size=1, locate_epoch
         // reduces to a single-step division (epoch_row_count == dataset total every epoch).
-        let (stream_epoch, rows_into_epoch) = dist_config.locate_epoch(
-            state.iteration_seed,
-            shuffle,
-            dispatched_rows,
-            row_group_index,
-        );
+        let (stream_epoch, rows_into_epoch) =
+            dist_config.locate_epoch(shuffle_config, dispatched_rows, row_group_index);
         let (row_group, row_in_group) = locate_row_in_order(
-            state.iteration_seed,
-            shuffle,
             stream_epoch,
+            shuffle_config,
             dist_config,
             row_group_index,
             rows_into_epoch,
@@ -188,7 +182,7 @@ impl Checkpoint {
     /// Builds a `Checkpoint` from the current `DataLoader` state.
     pub fn from_state(
         state: &DataLoaderState,
-        shuffle: bool,
+        shuffle_config: ShuffleConfig,
         dist_config: DistributedConfig,
         dataset_identifier: u64,
         row_group_index: &[RowGroupMeta],
@@ -199,7 +193,7 @@ impl Checkpoint {
             .map_or(BufferSnapshot::default(), Buffer::snapshot);
         let cursor = CheckpointCursor::from_state(
             state,
-            shuffle,
+            shuffle_config,
             dist_config,
             row_group_index,
             &buffer_snapshot,
