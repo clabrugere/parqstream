@@ -96,7 +96,10 @@ pub enum Error {
     InvalidRank { rank: usize, world_size: usize },
 
     #[error("world_size ({world_size}) exceeds number of row groups ({num_row_groups}); every rank must receive at least one row group")]
-    WorldSizeTooLarge { world_size: usize, num_row_groups: usize },
+    WorldSizeTooLarge {
+        world_size: usize,
+        num_row_groups: usize,
+    },
 
     #[error("distributed config mismatch: checkpoint={checkpoint:?}, loader={current:?}")]
     DistributedMismatch {

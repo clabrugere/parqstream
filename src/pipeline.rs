@@ -13,7 +13,7 @@ use crate::error::Result;
 #[derive(Debug)]
 pub struct StreamCursor {
     pub epoch: usize,
-    pub row_group: usize,
+    pub row_group_pos: usize, // position within the rank-local epoch order
     pub row_in_group: usize,
 }
 
@@ -22,14 +22,14 @@ impl StreamCursor {
     pub fn advance(&mut self, num_rows: usize, row_group_length: usize) {
         self.row_in_group += num_rows;
         if self.row_in_group >= row_group_length {
-            self.row_group += 1;
+            self.row_group_pos += 1;
             self.row_in_group = 0;
         }
     }
     /// Resets to the start of the next epoch.
     pub fn new_epoch(&mut self) {
         self.epoch += 1;
-        self.row_group = 0;
+        self.row_group_pos = 0;
         self.row_in_group = 0;
     }
 }
@@ -38,7 +38,7 @@ impl From<&CheckpointCursor> for StreamCursor {
     fn from(cursor: &CheckpointCursor) -> Self {
         Self {
             epoch: cursor.stream_epoch,
-            row_group: cursor.row_group,
+            row_group_pos: cursor.row_group_pos,
             row_in_group: cursor.row_in_group,
         }
     }
@@ -68,11 +68,11 @@ pub fn chunk_dispatcher(
     let rank_groups = order.len();
 
     loop {
-        if cursor.row_group >= rank_groups {
+        if cursor.row_group_pos >= rank_groups {
             cursor.new_epoch();
             order = dist_config.epoch_order(shuffle_config, cursor.epoch, num_global);
         }
-        let row_group_idx = order[cursor.row_group];
+        let row_group_idx = order[cursor.row_group_pos];
         let row_group_length = row_group_lengths[row_group_idx];
         let num_rows = chunk_size.min(row_group_length - cursor.row_in_group);
 
@@ -102,8 +102,8 @@ pub fn chunk_reader(
         num_rows,
     } in chunk_rx
     {
-        let meta = &dataset.row_group_index[row_group_idx];
-        match dataset.read_row_group_range(meta.file_idx, meta.row_group_idx, start_row, num_rows) {
+        let row_group = &dataset.row_group_index[row_group_idx];
+        match dataset.read_row_group_range(row_group, start_row, num_rows) {
             Ok(chunk_data) => {
                 if batch_tx.send(Ok(chunk_data)).is_err() {
                     return; // consumer dropped

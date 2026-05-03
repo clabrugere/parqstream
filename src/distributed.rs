@@ -52,11 +52,11 @@ impl DistributedConfig {
         &self,
         shuffle_config: ShuffleConfig,
         epoch: usize,
-        rgi: &[RowGroupMeta],
+        row_group_index: &[RowGroupMeta],
     ) -> usize {
-        self.epoch_order(shuffle_config, epoch, rgi.len())
+        self.epoch_order(shuffle_config, epoch, row_group_index.len())
             .iter()
-            .map(|&i| rgi[i].num_rows)
+            .map(|&i| row_group_index[i].num_rows)
             .sum()
     }
 
