@@ -48,6 +48,12 @@ class DataLoader:
             returns whatever the iteration protocol should yield. When provided,
             the default numpy conversion is bypassed entirely, so the callable
             is responsible for all column extraction and type conversion.
+        rank: This process's rank in a distributed training setup (0-based).
+            Together with `world_size`, determines which row groups this loader
+            iterates over. Defaults to 0 (single-process).
+        world_size: Total number of processes in a distributed training setup.
+            The dataset is partitioned into `world_size` disjoint subsets;
+            each rank iterates over its own subset. Defaults to 1 (single-process).
 
     Use :meth:`checkpoint` / :meth:`load_checkpoint` to save and resume
     iteration position. :meth:`state_dict` / :meth:`load_state_dict` are
@@ -65,6 +71,8 @@ class DataLoader:
         buffer_size: int | None = None,
         seed: int | None = None,
         collate_fn: Callable | None = None,
+        rank: int = 0,
+        world_size: int = 1,
     ) -> None:
         self._dataloader = _RustDataLoader(
             dataset._dataset,
@@ -75,6 +83,8 @@ class DataLoader:
             prefetch_factor,
             buffer_size,
             seed,
+            rank,
+            world_size,
         )
         self._collate_fn = collate_fn
 

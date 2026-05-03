@@ -9,6 +9,7 @@ use crate::batch::Batch;
 use crate::buffer::Buffer;
 use crate::checkpoint::{Checkpoint, CheckpointCursor};
 use crate::dataset::Dataset;
+use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
 use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk, StreamCursor};
 
@@ -65,6 +66,7 @@ pub struct DataLoader {
     prefetch_factor: usize,
     buffer_size: Option<usize>,
     seed: u64,
+    dist_config: DistributedConfig,
     state: DataLoaderState,
     checkpoint: Option<Checkpoint>,
 }
@@ -76,14 +78,27 @@ impl DataLoader {
     }
 
     /// Spawn the feeder and worker threads and return the batch receiver
-    fn spawn_pipeline(&self, seed: u64, cursor: &CheckpointCursor) -> Receiver<Result<RecordBatch>> {
+    fn spawn_pipeline(
+        &self,
+        seed: u64,
+        cursor: &CheckpointCursor,
+    ) -> Receiver<Result<RecordBatch>> {
         let dataset = self.dataset.clone();
+        // Default to the rank-local epoch size so a single buffer fill never spans two epochs.
+        // For world_size=1 this equals dataset.total_rows (same as before).
+        let rank_local_epoch_size: usize = self
+            .dist_config
+            .epoch_order(0, false, 0, dataset.row_group_index.len())
+            .iter()
+            .map(|&i| dataset.row_group_index[i].num_rows)
+            .sum();
         let buffer_size = self
             .buffer_size
-            .unwrap_or(dataset.total_rows)
+            .unwrap_or(rank_local_epoch_size)
             .max(self.batch_size);
         let chunk_size = (buffer_size + self.num_workers - 1).div_ceil(self.num_workers);
         let shuffle = self.shuffle;
+        let dist_config = self.dist_config;
 
         // Pre-compute row group layout for feeder
         let row_group_lengths = dataset
@@ -106,6 +121,7 @@ impl DataLoader {
                 shuffle,
                 seed,
                 cursor,
+                dist_config,
             );
         });
 
@@ -138,6 +154,8 @@ impl DataLoader {
         prefetch_factor = 1,
         buffer_size = None,
         seed = None,
+        rank = 0,
+        world_size = 1,
     ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -149,6 +167,8 @@ impl DataLoader {
         prefetch_factor: usize,
         buffer_size: Option<usize>,
         seed: Option<u64>,
+        rank: usize,
+        world_size: usize,
     ) -> Result<Self> {
         if batch_size == 0 {
             return Err(Error::InvalidBatchSize(batch_size));
@@ -165,6 +185,18 @@ impl DataLoader {
         if buffer_size.is_some_and(|bs| bs < batch_size) {
             return Err(Error::InvalidBufferSize(buffer_size.unwrap()));
         }
+        if world_size == 0 {
+            return Err(Error::InvalidWorldSize(0));
+        }
+        if rank >= world_size {
+            return Err(Error::InvalidRank { rank, world_size });
+        }
+        if world_size > 1 && dataset.row_group_index.len() < world_size {
+            return Err(Error::WorldSizeTooLarge {
+                world_size,
+                num_row_groups: dataset.row_group_index.len(),
+            });
+        }
 
         let available_cores = thread::available_parallelism()
             .map_err(Error::ParallelismUnavailable)?
@@ -179,6 +211,7 @@ impl DataLoader {
             shuffle,
             buffer_size,
             seed,
+            dist_config: DistributedConfig { rank, world_size },
             state: DataLoaderState::default(),
             checkpoint: None,
         })
@@ -252,6 +285,7 @@ impl DataLoader {
         Ok(Checkpoint::from_state(
             &self.state,
             self.shuffle,
+            self.dist_config,
             self.dataset.identifier,
             &self.dataset.row_group_index,
         ))
@@ -269,6 +303,14 @@ impl DataLoader {
                 current: self.dataset.identifier,
             });
         }
+        if checkpoint.dist_config.rank != self.dist_config.rank
+            || checkpoint.dist_config.world_size != self.dist_config.world_size
+        {
+            return Err(Error::DistributedMismatch {
+                checkpoint: checkpoint.dist_config,
+                current: self.dist_config,
+            });
+        }
         self.state.epoch = checkpoint.epoch;
         self.checkpoint = Some(checkpoint);
         Ok(())
@@ -280,14 +322,18 @@ impl DataLoader {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={:?}, num_workers={}, prefetch_factor={}, buffer_size={:?})",
+            "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={:?}, shuffle={}, num_workers={}, prefetch_factor={}, buffer_size={:?}, seed={}, rank={}, world_size={})",
             self.dataset.total_rows,
             self.dataset.columns,
             self.batch_size,
             self.num_steps,
+            self.shuffle,
             self.num_workers,
             self.prefetch_factor,
             self.buffer_size,
+            self.seed,
+            self.dist_config.rank,
+            self.dist_config.world_size,
         )
     }
 }
