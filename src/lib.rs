@@ -3,6 +3,7 @@ mod buffer;
 mod checkpoint;
 mod dataloader;
 mod dataset;
+mod distributed;
 mod error;
 mod pipeline;
 

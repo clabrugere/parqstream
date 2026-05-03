@@ -1,12 +1,10 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyDictMethods, PyType};
-use rand::rngs::SmallRng;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
 
 use crate::buffer::{Buffer, BufferSnapshot};
 use crate::dataloader::DataLoaderState;
 use crate::dataset::RowGroupMeta;
+use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
 
 fn pydict_get<'py, T>(dict: &Bound<'py, PyDict>, key: &str) -> Result<T>
@@ -18,24 +16,21 @@ where
         .and_then(|v| Ok(v.extract::<T>()?))
 }
 
-/// Walk the ordered row groups to find which one contains `rows`
+/// Walk the rank-local ordered row groups to find which one contains `rows`.
 fn locate_row_in_order(
-    seed: u64,
+    base_seed: u64,
     shuffle: bool,
+    epoch: usize,
+    dist_config: DistributedConfig,
     row_group_index: &[RowGroupMeta],
     rows: usize,
 ) -> (usize, usize) {
-    // Reconstruct the row group visit order for this epoch, mirroring chunk_dispatcher's logic:
-    // always shuffle [0..N) so each epoch's order is independent of the previous one.
-    let mut order: Vec<usize> = (0..row_group_index.len()).collect();
-    if shuffle {
-        order.shuffle(&mut SmallRng::seed_from_u64(seed));
-    }
+    let order = dist_config.epoch_order(base_seed, shuffle, epoch, row_group_index.len());
 
     let mut rows = rows;
     let mut row_group = 0;
     let mut row_in_group = 0;
-    // always terminates because rows < total_rows as rows = epoch_rows % total_rows
+    // always terminates because rows < rank-local epoch total
     for (seq_idx, &rg_idx) in order.iter().enumerate() {
         let row_group_rows = row_group_index[rg_idx].num_rows;
         if rows < row_group_rows {
@@ -68,11 +63,10 @@ impl CheckpointCursor {
     fn from_state(
         state: &DataLoaderState,
         shuffle: bool,
+        dist_config: DistributedConfig,
         row_group_index: &[RowGroupMeta],
         buffer_snapshot: &BufferSnapshot,
     ) -> Self {
-        let total_rows = row_group_index.iter().map(|rg| rg.num_rows).sum::<usize>();
-
         // rows_epoch_start accumulates the absolute epoch-row baseline across resume levels
         // so that rows_at_buffer_start stays correct even after chained resumes.
         let rows_epoch_start = state.rows_epoch_start + state.rows_yielded;
@@ -83,7 +77,7 @@ impl CheckpointCursor {
         // If buffer_offset < tail_size (cursor is mid-tail), fall back to the tail-start position.
         let buffer_offset = buffer_snapshot.offset;
         let buffer_tail_size = buffer_snapshot.tail_size;
-        let (epoch_rows, corrected_buffer_offset) = if buffer_offset >= buffer_tail_size {
+        let (dispatched_rows, corrected_buffer_offset) = if buffer_offset >= buffer_tail_size {
             (
                 rows_at_buffer_start + buffer_tail_size,
                 buffer_offset - buffer_tail_size,
@@ -96,11 +90,22 @@ impl CheckpointCursor {
         // Buffer::new starts with the value it had before that refill fired.
         let refill_count = buffer_snapshot.seed_offset.saturating_sub(1);
 
-        // Locate the feeder's row group by walking the ordered visit sequence until we find the one containing `epoch_rows`
-        let stream_epoch = epoch_rows / total_rows;
-        let rows = epoch_rows % total_rows;
-        let seed = state.iteration_seed + stream_epoch as u64;
-        let (row_group, row_in_group) = locate_row_in_order(seed, shuffle, row_group_index, rows);
+        // Locate the feeder's epoch and position within it. For world_size=1, locate_epoch
+        // reduces to a single-step division (epoch_row_count == dataset total every epoch).
+        let (stream_epoch, rows_into_epoch) = dist_config.locate_epoch(
+            state.iteration_seed,
+            shuffle,
+            dispatched_rows,
+            row_group_index,
+        );
+        let (row_group, row_in_group) = locate_row_in_order(
+            state.iteration_seed,
+            shuffle,
+            stream_epoch,
+            dist_config,
+            row_group_index,
+            rows_into_epoch,
+        );
 
         Self {
             stream_epoch,
@@ -157,6 +162,7 @@ pub struct Checkpoint {
     pub dataset_identifier: u64,
     pub epoch: usize,
     pub steps_remaining: Option<usize>,
+    pub dist_config: DistributedConfig,
     pub cursor: CheckpointCursor,
 }
 
@@ -171,6 +177,8 @@ impl<'py> IntoPyObject<'py> for &Checkpoint {
         dict.set_item("dataset_identifier", self.dataset_identifier)?;
         dict.set_item("epoch", self.epoch)?;
         dict.set_item("steps_remaining", self.steps_remaining)?;
+        dict.set_item("rank", self.dist_config.rank)?;
+        dict.set_item("world_size", self.dist_config.world_size)?;
         dict.set_item("cursor", &self.cursor)?;
         Ok(dict)
     }
@@ -181,6 +189,7 @@ impl Checkpoint {
     pub fn from_state(
         state: &DataLoaderState,
         shuffle: bool,
+        dist_config: DistributedConfig,
         dataset_identifier: u64,
         row_group_index: &[RowGroupMeta],
     ) -> Self {
@@ -188,14 +197,20 @@ impl Checkpoint {
             .buffer
             .as_ref()
             .map_or(BufferSnapshot::default(), Buffer::snapshot);
-        let cursor =
-            CheckpointCursor::from_state(state, shuffle, row_group_index, &buffer_snapshot);
+        let cursor = CheckpointCursor::from_state(
+            state,
+            shuffle,
+            dist_config,
+            row_group_index,
+            &buffer_snapshot,
+        );
 
         Self {
             seed: state.iteration_seed,
             dataset_identifier,
             epoch: state.epoch,
             steps_remaining: state.steps_remaining,
+            dist_config,
             cursor,
         }
     }
@@ -211,20 +226,33 @@ impl Checkpoint {
     /// Deserializes a checkpoint from a dict produced by [`Checkpoint::to_dict`].
     #[classmethod]
     pub fn from_dict(_cls: &Bound<'_, PyType>, dict: &Bound<'_, PyDict>) -> Result<Self> {
+        let rank = dict
+            .get_item("rank")?
+            .map(|v| v.extract::<usize>())
+            .transpose()?
+            .unwrap_or(0);
+        let world_size = dict
+            .get_item("world_size")?
+            .map(|v| v.extract::<usize>())
+            .transpose()?
+            .unwrap_or(1);
         Ok(Self {
             seed: pydict_get(dict, "seed")?,
             dataset_identifier: pydict_get(dict, "dataset_identifier")?,
             epoch: pydict_get(dict, "epoch")?,
             steps_remaining: pydict_get(dict, "steps_remaining")?,
+            dist_config: DistributedConfig { rank, world_size },
             cursor: pydict_get(dict, "cursor")?,
         })
     }
 
     pub fn __repr__(&self) -> String {
         format!(
-            "Checkpoint(epoch={}, steps_remaining={:?}, cursor={{row_group={}, row_in_group={}, refill_count={}, buffer_offset={}}})",
+            "Checkpoint(epoch={}, steps_remaining={:?}, rank={}, world_size={}, cursor={{row_group={}, row_in_group={}, refill_count={}, buffer_offset={}}})",
             self.epoch,
             self.steps_remaining,
+            self.dist_config.rank,
+            self.dist_config.world_size,
             self.cursor.row_group,
             self.cursor.row_in_group,
             self.cursor.refill_count,

@@ -8,6 +8,8 @@ use parquet::errors::ParquetError;
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyStopIteration, PyTypeError, PyValueError};
 use pyo3::PyErr;
 
+use crate::distributed::DistributedConfig;
+
 /// All errors produced by this crate, mapped to the appropriate Python exception type on conversion.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -87,6 +89,21 @@ pub enum Error {
     #[error("invalid checkpoint format: {0}")]
     InvalidCheckpointFormat(String),
 
+    #[error("world_size must be >= 1, got {0}")]
+    InvalidWorldSize(usize),
+
+    #[error("rank must be < world_size, got rank={rank}, world_size={world_size}")]
+    InvalidRank { rank: usize, world_size: usize },
+
+    #[error("world_size ({world_size}) exceeds number of row groups ({num_row_groups}); every rank must receive at least one row group")]
+    WorldSizeTooLarge { world_size: usize, num_row_groups: usize },
+
+    #[error("distributed config mismatch: checkpoint={checkpoint:?}, loader={current:?}")]
+    DistributedMismatch {
+        checkpoint: DistributedConfig,
+        current: DistributedConfig,
+    },
+
     #[error(transparent)]
     Py(#[from] PyErr),
 }
@@ -112,7 +129,11 @@ impl From<Error> for PyErr {
             | Error::InvalidPrefetchFactor(_)
             | Error::InvalidBufferSize(_)
             | Error::DatasetMismatch { .. }
-            | Error::InvalidCheckpointFormat(_) => PyValueError::new_err(e.to_string()),
+            | Error::InvalidCheckpointFormat(_)
+            | Error::InvalidWorldSize(_)
+            | Error::InvalidRank { .. }
+            | Error::WorldSizeTooLarge { .. }
+            | Error::DistributedMismatch { .. } => PyValueError::new_err(e.to_string()),
             _ => PyRuntimeError::new_err(e.to_string()),
         }
     }

@@ -2,12 +2,10 @@ use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
 use crossbeam_channel::{Receiver, Sender};
-use rand::rngs::SmallRng;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
 
 use crate::checkpoint::CheckpointCursor;
 use crate::dataset::Dataset;
+use crate::distributed::DistributedConfig;
 use crate::error::Result;
 
 /// Tracks the dispatcher's position within the infinite epoch/row-group stream.
@@ -53,8 +51,8 @@ pub struct Chunk {
     pub num_rows: usize,
 }
 
-/// Emits read tasks to `chunk_tx` indefinitely, cycling through row groups epoch by epoch and
-/// shuffling each epoch's visit order if enabled.
+/// Emits read tasks to `chunk_tx` indefinitely, cycling through row groups epoch by epoch,
+/// shuffling each epoch's visit order if enabled, and retaining only this rank's strided slice.
 pub fn chunk_dispatcher(
     chunk_tx: &Sender<Chunk>,
     row_group_lengths: &[usize],
@@ -62,24 +60,17 @@ pub fn chunk_dispatcher(
     shuffle: bool,
     seed: u64,
     mut cursor: StreamCursor,
+    dist_config: DistributedConfig,
 ) {
-    let num_groups = row_group_lengths.len();
-    // Row group visit order for the current epoch. Shuffle seed = seed + epoch so
-    // each epoch gets an independent, deterministic order (mirrors locate_row_in_order in checkpoint.rs).
-    let mut order = (0..num_groups).collect::<Vec<_>>();
-    if shuffle {
-        order.shuffle(&mut SmallRng::seed_from_u64(seed + cursor.epoch as u64));
-    }
+    let num_global = row_group_lengths.len();
+    let mut order = dist_config.epoch_order(seed, shuffle, cursor.epoch, num_global);
+    // rank_groups is invariant across epochs: same dataset and same dist_config always produce the same count.
+    let rank_groups = order.len();
 
     loop {
-        if cursor.row_group >= num_groups {
+        if cursor.row_group >= rank_groups {
             cursor.new_epoch();
-            if shuffle {
-                // Reset to identity before shuffling: re-shuffling a non-identity slice would
-                // make epoch N's order depend on epoch N-1's, breaking checkpoint resume.
-                order = (0..num_groups).collect();
-                order.shuffle(&mut SmallRng::seed_from_u64(seed + cursor.epoch as u64));
-            }
+            order = dist_config.epoch_order(seed, shuffle, cursor.epoch, num_global);
         }
         let row_group_idx = order[cursor.row_group];
         let row_group_length = row_group_lengths[row_group_idx];
