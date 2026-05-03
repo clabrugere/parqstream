@@ -27,30 +27,30 @@ fn locate_row_in_order(
     let order = dist_config.epoch_order(shuffle_config, epoch, row_group_index.len());
 
     let mut rows = rows;
-    let mut row_group = 0;
+    let mut row_group_pos = 0;
     let mut row_in_group = 0;
     // always terminates because rows < rank-local epoch total
     for (seq_idx, &rg_idx) in order.iter().enumerate() {
         let row_group_rows = row_group_index[rg_idx].num_rows;
         if rows < row_group_rows {
-            row_group = seq_idx;
+            row_group_pos = seq_idx;
             row_in_group = rows;
             break;
         }
         rows -= row_group_rows;
     }
 
-    (row_group, row_in_group)
+    (row_group_pos, row_in_group)
 }
 
 /// Position within the infinite row-group stream, used to resume a `DataLoader`.
 ///
-/// `epoch` + `row_group` locate the feeder's starting row group.
+/// `epoch` + `row_group_pos` locate the feeder's starting row group.
 /// `refill_count` and `buffer_offset` locate the starting position within the Buffer.
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointCursor {
     pub stream_epoch: usize, // feeder's pass count, used to seed the shuffle
-    pub row_group: usize,
+    pub row_group_pos: usize, // position within the rank-local epoch order
     pub row_in_group: usize,
     pub refill_count: usize,
     pub buffer_offset: usize,
@@ -93,7 +93,7 @@ impl CheckpointCursor {
         // reduces to a single-step division (epoch_row_count == dataset total every epoch).
         let (stream_epoch, rows_into_epoch) =
             dist_config.locate_epoch(shuffle_config, dispatched_rows, row_group_index);
-        let (row_group, row_in_group) = locate_row_in_order(
+        let (row_group_pos, row_in_group) = locate_row_in_order(
             stream_epoch,
             shuffle_config,
             dist_config,
@@ -103,7 +103,7 @@ impl CheckpointCursor {
 
         Self {
             stream_epoch,
-            row_group,
+            row_group_pos,
             row_in_group,
             refill_count,
             buffer_offset: corrected_buffer_offset,
@@ -121,7 +121,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for CheckpointCursor {
             .map_err(|_| Error::InvalidCheckpointFormat("'cursor' must be a dict".into()))?;
         let cursor = CheckpointCursor {
             stream_epoch: pydict_get(&dict, "epoch")?,
-            row_group: pydict_get(&dict, "row_group")?,
+            row_group_pos: pydict_get(&dict, "row_group_pos")?,
             row_in_group: pydict_get(&dict, "row_in_group")?,
             refill_count: pydict_get(&dict, "refill_count")?,
             buffer_offset: pydict_get(&dict, "buffer_offset")?,
@@ -139,7 +139,7 @@ impl<'py> IntoPyObject<'py> for &CheckpointCursor {
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
         let dict = PyDict::new(py);
         dict.set_item("epoch", self.stream_epoch)?;
-        dict.set_item("row_group", self.row_group)?;
+        dict.set_item("row_group_pos", self.row_group_pos)?;
         dict.set_item("row_in_group", self.row_in_group)?;
         dict.set_item("refill_count", self.refill_count)?;
         dict.set_item("buffer_offset", self.buffer_offset)?;
@@ -242,12 +242,12 @@ impl Checkpoint {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "Checkpoint(epoch={}, steps_remaining={:?}, rank={}, world_size={}, cursor={{row_group={}, row_in_group={}, refill_count={}, buffer_offset={}}})",
+            "Checkpoint(epoch={}, steps_remaining={:?}, rank={}, world_size={}, cursor={{row_group_pos={}, row_in_group={}, refill_count={}, buffer_offset={}}})",
             self.epoch,
             self.steps_remaining,
             self.dist_config.rank,
             self.dist_config.world_size,
-            self.cursor.row_group,
+            self.cursor.row_group_pos,
             self.cursor.row_in_group,
             self.cursor.refill_count,
             self.cursor.buffer_offset,

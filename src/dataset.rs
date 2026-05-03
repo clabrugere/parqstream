@@ -56,7 +56,7 @@ fn build_row_group_index(files: &[ParquetFile]) -> Result<(Vec<RowGroupMeta>, us
             let num_rows = parquet_file.num_rows(row_group_idx)?;
             row_group_index.push(RowGroupMeta {
                 file_idx,
-                row_group_idx,
+                idx: row_group_idx,
                 row_offset: total_rows,
                 num_rows,
             });
@@ -87,11 +87,11 @@ fn hash_dataset(
 }
 
 /// Metadata for a single Parquet row group, with its position in the global index.
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct RowGroupMeta {
     pub file_idx: usize,
-    pub row_group_idx: usize, // within file
-    pub row_offset: usize,    // global first row of this group
+    pub idx: usize,        // within file
+    pub row_offset: usize, // global first row of this group
     pub num_rows: usize,
 }
 
@@ -201,16 +201,15 @@ impl Dataset {
         })
     }
 
-    /// Reads `len` rows from `row_group_idx` in `file_idx`, skipping the first `start` rows,
+    /// Reads `len` rows from `row_group`, skipping the first `start` rows,
     /// and returns a projected `RecordBatch`.
     pub fn read_row_group_range(
         &self,
-        file_idx: usize,
-        row_group_idx: usize,
+        row_group: &RowGroupMeta,
         start: usize,
         len: usize,
     ) -> Result<RecordBatch> {
-        let parquet_file = &self.files[file_idx];
+        let parquet_file = &self.files[row_group.file_idx];
         let path = parquet_file.path.clone();
         let file = File::open(&path).map_err(|e| Error::OpenFile { path, source: e })?;
 
@@ -225,13 +224,13 @@ impl Dataset {
             file,
             parquet_file.arrow_meta.clone(),
         )
-        .with_row_groups(vec![row_group_idx])
+        .with_row_groups(vec![row_group.idx])
         .with_projection(self.projection.clone())
         .with_row_selection(RowSelection::from(selectors))
         .build()
         .map_err(|e| Error::BuildReader {
             path: parquet_file.path.clone(),
-            row_group_idx,
+            row_group_idx: row_group.idx,
             source: e,
         })?
         .collect::<StdResult<Vec<_>, _>>()?;
