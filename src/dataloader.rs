@@ -13,6 +13,12 @@ use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
 use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk, StreamCursor};
 
+#[derive(Debug, Clone, Copy)]
+pub struct ShuffleConfig {
+    pub shuffle: bool,
+    pub seed: u64,
+}
+
 /// Stores the state of a Dataloader, which can be serialized to a Checkpoint for saving and resuming later
 #[derive(Debug, Default)]
 pub struct DataLoaderState {
@@ -61,10 +67,10 @@ pub struct DataLoader {
     dataset: Arc<Dataset>,
     batch_size: usize,
     num_steps: Option<usize>,
-    shuffle: bool,
     num_workers: usize,
     prefetch_factor: usize,
     buffer_size: Option<usize>,
+    shuffle: bool,
     seed: u64,
     dist_config: DistributedConfig,
     state: DataLoaderState,
@@ -80,15 +86,15 @@ impl DataLoader {
     /// Spawn the feeder and worker threads and return the batch receiver
     fn spawn_pipeline(
         &self,
-        seed: u64,
+        shuffle_config: ShuffleConfig,
         cursor: &CheckpointCursor,
     ) -> Receiver<Result<RecordBatch>> {
         let dataset = self.dataset.clone();
         // Default to the rank-local epoch size so a single buffer fill never spans two epochs.
         // For world_size=1 this equals dataset.total_rows (same as before).
-        let rank_local_epoch_size: usize = self
+        let rank_local_epoch_size = self
             .dist_config
-            .epoch_order(0, false, 0, dataset.row_group_index.len())
+            .epoch_order(shuffle_config, 0, dataset.row_group_index.len())
             .iter()
             .map(|&i| dataset.row_group_index[i].num_rows)
             .sum();
@@ -97,7 +103,6 @@ impl DataLoader {
             .unwrap_or(rank_local_epoch_size)
             .max(self.batch_size);
         let chunk_size = (buffer_size + self.num_workers - 1).div_ceil(self.num_workers);
-        let shuffle = self.shuffle;
         let dist_config = self.dist_config;
 
         // Pre-compute row group layout for feeder
@@ -118,9 +123,8 @@ impl DataLoader {
                 &chunk_tx,
                 &row_group_lengths,
                 chunk_size,
-                shuffle,
-                seed,
                 cursor,
+                shuffle_config,
                 dist_config,
             );
         });
@@ -202,14 +206,15 @@ impl DataLoader {
             .map_err(Error::ParallelismUnavailable)?
             .get();
         let seed = seed.unwrap_or_else(rand::random);
+
         Ok(Self {
             dataset: Arc::new(dataset.clone()),
             batch_size,
             num_steps,
             num_workers: num_workers.min(available_cores).max(1),
             prefetch_factor,
-            shuffle,
             buffer_size,
+            shuffle,
             seed,
             dist_config: DistributedConfig { rank, world_size },
             state: DataLoaderState::default(),
@@ -231,12 +236,14 @@ impl DataLoader {
             ),
             None => (slf.epoch_seed(), slf.num_steps, CheckpointCursor::default()),
         };
-
-        let prefetch_rx = slf.spawn_pipeline(seed, &cursor);
+        let shuffle_config = ShuffleConfig {
+            shuffle: slf.shuffle,
+            seed,
+        };
+        let prefetch_rx = slf.spawn_pipeline(shuffle_config, &cursor);
         let buffer = Buffer::new(
             prefetch_rx,
-            slf.shuffle,
-            seed,
+            shuffle_config,
             cursor.refill_count,
             cursor.buffer_offset,
         );
@@ -282,9 +289,14 @@ impl DataLoader {
             return Ok(checkpoint.clone());
         }
 
+        let shuffle_config = ShuffleConfig {
+            shuffle: self.shuffle,
+            seed: self.state.iteration_seed,
+        };
+
         Ok(Checkpoint::from_state(
             &self.state,
-            self.shuffle,
+            shuffle_config,
             self.dist_config,
             self.dataset.identifier,
             &self.dataset.row_group_index,
@@ -322,16 +334,16 @@ impl DataLoader {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={:?}, shuffle={}, num_workers={}, prefetch_factor={}, buffer_size={:?}, seed={}, rank={}, world_size={})",
+            "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={:?}, shuffle={}, seed={}, num_workers={}, prefetch_factor={}, buffer_size={:?}, rank={}, world_size={})",
             self.dataset.total_rows,
             self.dataset.columns,
             self.batch_size,
             self.num_steps,
             self.shuffle,
+            self.seed,
             self.num_workers,
             self.prefetch_factor,
             self.buffer_size,
-            self.seed,
             self.dist_config.rank,
             self.dist_config.world_size,
         )
