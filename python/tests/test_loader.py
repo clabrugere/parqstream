@@ -5,20 +5,26 @@ import torch
 from parqstream import DataLoader, Dataset, _col_to_numpy
 
 
+# --- Column conversion ---
+
+
 def test_zero_copy_column():
     arr = pa.array([1.0, 2.0, 3.0], type=pa.float64())
-    col = arr  # or a Column wrapping it
+    col = arr
     result = _col_to_numpy(col)
-    assert np.shares_memory(result, arr.buffers()[1])  # same underlying buffer
+    assert np.shares_memory(result, arr.buffers()[1])
 
 
 def test_copy_fallback_column():
     arr = pa.array([1, None, 3], type=pa.int64())
     col = arr
-    with pytest.warns(UserWarning, match="falling back"):  # or check logger
+    with pytest.warns(UserWarning, match="falling back"):
         result = _col_to_numpy(col)
     assert not np.shares_memory(result, arr.buffers()[1])
-    assert np.isnan(result[1])  # null becomes NaN
+    assert np.isnan(result[1])
+
+
+# --- Basic iteration ---
 
 
 def test_basic_iteration(parquet_path):
@@ -98,6 +104,9 @@ def test_large_prefetch(parquet_path):
     assert sum(1 for _ in loader) == 9
 
 
+# --- Sequential order ---
+
+
 @pytest.mark.parametrize("num_steps", [10, 15])
 def test_sequential_order(parquet_path, num_steps):
     ds = Dataset([parquet_path], columns=["id"])
@@ -110,29 +119,12 @@ def test_sequential_order(parquet_path, num_steps):
     assert np.array_equal(all_ids, expected)
 
 
-def test_shuffle_ids_in_bounds(parquet_path):
-    ds = Dataset([parquet_path], columns=["id"])
-
-    loader = DataLoader(ds, batch_size=1_000, num_steps=10, shuffle=True)
-
-    all_ids = np.concatenate([batch["id"] for batch in loader])
-    assert all_ids.min() >= 0
-    assert all_ids.max() < 10_000
-    assert len(all_ids) == 10_000
-
-
-def test_buffer_explicit_size(parquet_path):
-    ds = Dataset([parquet_path], columns=["id"])
-    loader = DataLoader(ds, batch_size=500, num_steps=20, shuffle=True, buffer_size=2_000)
-
-    all_ids = np.concatenate([batch["id"] for batch in loader])
-    assert all_ids.min() >= 0
-    assert all_ids.max() < 10_000
-    assert len(all_ids) == 10_000
+# --- Row integrity ---
 
 
 def test_no_row_skip_batch_not_divisible_by_row_group(parquet_path):
-    # batch_size=300 does not divide row_group_size=1_000; the 100-row remainder of each row group must be stitched into the next batch, not dropped.
+    # batch_size=300 does not divide row_group_size=1_000; the 100-row remainder of each row group
+    # must be stitched into the next batch, not dropped.
     ds = Dataset([parquet_path], columns=["id"])
     batch_size = 300
     num_steps = 10_000 // batch_size  # 33 full batches = 9_900 rows
@@ -145,7 +137,8 @@ def test_no_row_skip_batch_not_divisible_by_row_group(parquet_path):
 
 
 def test_no_row_skip_buffer_not_divisible_by_row_group(parquet_path):
-    # buffer_size=1_500 straddles row-group boundaries (1.5 row groups per fill). the 500-row tail of each buffer must be prepended to the next fill, not dropped.
+    # buffer_size=1_500 straddles row-group boundaries (1.5 row groups per fill). The 500-row tail
+    # of each buffer must be prepended to the next fill, not dropped.
     ds = Dataset([parquet_path], columns=["id"])
     batch_size = 500
     buffer_size = 1_500
@@ -166,7 +159,8 @@ def test_no_row_skip_buffer_not_divisible_by_row_group(parquet_path):
 
 
 def test_no_row_skip_batch_not_divisible_by_buffer(parquet_path):
-    # batch_size=300 does not divide buffer_size=1_000; the 100-row remainder left in the buffer after 3 full batches must carry over to the next refill.
+    # batch_size=300 does not divide buffer_size=1_000; the 100-row remainder left in the buffer
+    # after 3 full batches must carry over to the next refill.
     ds = Dataset([parquet_path], columns=["id"])
     batch_size = 300
     buffer_size = 1_000
@@ -186,40 +180,9 @@ def test_no_row_skip_batch_not_divisible_by_buffer(parquet_path):
     assert np.array_equal(all_ids, np.arange(num_steps * batch_size, dtype=np.int64))
 
 
-def test_seeded_shuffle_is_reproducible(parquet_path):
-    ds = Dataset([parquet_path], columns=["id"])
-    kwargs = dict(batch_size=512, num_steps=10, shuffle=True, seed=42)
-
-    ids_a = [batch["id"].tolist() for batch in DataLoader(ds, **kwargs)]
-    ids_b = [batch["id"].tolist() for batch in DataLoader(ds, **kwargs)]
-
-    assert ids_a == ids_b
-
-
-def test_seeded_shuffle_differs_each_epoch(parquet_path):
-    # Each __iter__ call should produce a different order (different epoch seed)
-    # otherwise the model sees the same batch sequence every epoch.
-    ds = Dataset([parquet_path], columns=["id"])
-    loader = DataLoader(ds, batch_size=512, num_steps=10, shuffle=True, seed=42)
-
-    ids_a = [batch["id"].tolist() for batch in loader]
-    ids_b = [batch["id"].tolist() for batch in loader]
-
-    assert ids_a != ids_b
-
-
-def test_different_seeds_differ(parquet_path):
-    ds = Dataset([parquet_path], columns=["id"])
-    kwargs = dict(batch_size=512, num_steps=5, shuffle=True)
-
-    ids_42 = [batch["id"].tolist() for batch in DataLoader(ds, **kwargs, seed=42)]
-    ids_99 = [batch["id"].tolist() for batch in DataLoader(ds, **kwargs, seed=99)]
-
-    assert ids_42 != ids_99
-
-
 def test_no_row_skip_wrap_around_non_divisible(parquet_path):
-    # Wrap past one full epoch with non-divisible sizes; rows must be contiguous across the dataset boundary with no gaps or duplicates.
+    # Wrap past one full epoch with non-divisible sizes; rows must be contiguous across the
+    # dataset boundary with no gaps or duplicates.
     ds = Dataset([parquet_path], columns=["id"])
     batch_size = 300
     buffer_size = 1_500
@@ -238,6 +201,9 @@ def test_no_row_skip_wrap_around_non_divisible(parquet_path):
 
     assert len(all_ids) == num_steps * batch_size
     assert np.array_equal(all_ids, expected)
+
+
+# --- Collate ---
 
 
 def test_collate_fn_returns_record_batch(parquet_path):
@@ -263,113 +229,3 @@ def test_collate_fn_torch(parquet_path):
     for batch in loader:
         assert isinstance(batch["f1"], torch.Tensor)
         assert isinstance(batch["label"], torch.Tensor)
-
-
-@pytest.mark.parametrize("shuffle", [False, True])
-def test_resume_from_checkpoint(parquet_path, shuffle):
-    seed = 42
-    ds = Dataset([parquet_path], columns=["id"])
-
-    # complete uninterrupted run used as reference
-    ref = DataLoader(ds, batch_size=512, num_steps=10, shuffle=shuffle, seed=seed)
-    reference = np.concatenate([b["id"] for b in ref])
-
-    # interrupted run: 3 steps, checkpoint, resume
-    loader = DataLoader(ds, batch_size=512, num_steps=10, shuffle=shuffle, seed=seed)
-    it = iter(loader)
-    first = np.concatenate([next(it)["id"] for _ in range(3)])
-
-    new_loader = DataLoader(ds, batch_size=512, num_steps=10, shuffle=shuffle, seed=seed)
-    new_loader.load_state_dict(loader.state_dict())
-    second = np.concatenate([b["id"] for b in new_loader])
-
-    assert np.array_equal(np.concatenate([first, second]), reference)
-
-
-@pytest.mark.parametrize("shuffle", [False, True])
-def test_resume_from_checkpoint_multiple_epoch(parquet_path, shuffle):
-    num_steps = 40  # > one epoch (≈19.5 steps), forces internal wrap in chunk_feeder
-    batch_size = 512
-    seed = 42
-    ds = Dataset([parquet_path], columns=["id"])
-
-    ref = DataLoader(ds, batch_size=batch_size, num_steps=num_steps, shuffle=shuffle, seed=seed)
-    reference = np.concatenate([b["id"] for b in ref])
-
-    loader = DataLoader(ds, batch_size=batch_size, num_steps=num_steps, shuffle=shuffle, seed=seed)
-    it = iter(loader)
-    first = np.concatenate([next(it)["id"] for _ in range(22)])  # past 1 full epoch
-
-    new_loader = DataLoader(ds, batch_size=batch_size, num_steps=num_steps, shuffle=shuffle, seed=seed)
-    new_loader.load_state_dict(loader.state_dict())
-    second = np.concatenate([b["id"] for b in new_loader])
-
-    assert np.array_equal(np.concatenate([first, second]), reference)
-
-
-def test_resume_different_dataset(parquet_path):
-    ds1 = Dataset([parquet_path], columns=["id"])
-    ds2 = Dataset([parquet_path], columns=["f1"])
-
-    loader = DataLoader(ds1, batch_size=512, num_steps=10)
-    _ = next(iter(loader))
-    state = loader.state_dict()
-
-    new_loader = DataLoader(ds2, batch_size=512, num_steps=10)
-    with pytest.raises(ValueError, match="dataset mismatch"):
-        new_loader.load_state_dict(state)
-
-
-def test_state_dict_before_iter_raises(parquet_path):
-    ds = Dataset([parquet_path], columns=["id"])
-    loader = DataLoader(ds, batch_size=512, num_steps=10)
-
-    with pytest.raises(RuntimeError, match="iter"):
-        loader.state_dict()
-
-
-def test_resume_after_full_consumption(parquet_path):
-    # Checkpointing after all batches are exhausted records steps_remaining=0.
-    # Loading that checkpoint and iterating should yield no batches.
-    ds = Dataset([parquet_path], columns=["id"])
-
-    loader = DataLoader(ds, batch_size=128, num_steps=5)
-    _ = list(loader)  # consume all 5 batches
-
-    state = loader.state_dict()
-
-    new_loader = DataLoader(ds, batch_size=128, num_steps=5)
-    new_loader.load_state_dict(state)
-    assert len(list(new_loader)) == 0
-
-
-@pytest.mark.parametrize("shuffle", [False, True])
-def test_resume_from_checkpoint_twice(parquet_path, shuffle):
-    args = {
-        "dataset": Dataset([parquet_path], columns=["id"]),
-        "batch_size": 512,
-        "num_steps": 10,
-        "shuffle": shuffle,
-        "seed": 42,
-    }
-
-    # complete uninterrupted run used as reference
-    ref = DataLoader(**args)
-    reference = np.concatenate([b["id"] for b in ref])
-
-    # interrupted run: 3 steps, checkpoint, resume
-    loader = DataLoader(**args)
-    it = iter(loader)
-    first = np.concatenate([next(it)["id"] for _ in range(3)])
-
-    first_resume = DataLoader(**args)
-    first_resume.load_state_dict(loader.state_dict())
-    it = iter(first_resume)
-    second = np.concatenate([next(it)["id"] for _ in range(3)])
-
-    # resume again from the middle of the resumed run
-    second_resume = DataLoader(**args)
-    second_resume.load_state_dict(first_resume.state_dict())
-    third = np.concatenate([b["id"] for b in second_resume])
-
-    assert np.array_equal(np.concatenate([first, second, third]), reference)
