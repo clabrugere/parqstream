@@ -1,9 +1,7 @@
 import numpy as np
 import pyarrow as pa
 import pytest
-import torch
 from parqstream import DataLoader, Dataset, _col_to_numpy
-
 
 # --- Column conversion ---
 
@@ -62,7 +60,9 @@ def test_len_infinite(parquet_path):
     ds = Dataset([parquet_path], columns=["id"])
     loader = DataLoader(ds, batch_size=512, num_steps=None)
 
-    with pytest.raises(TypeError, match="length is undefined for infinite DataLoader, set num_steps to enable __len__"):
+    with pytest.raises(
+        TypeError, match="length is undefined for infinite DataLoader, set num_steps to enable __len__"
+    ):
         _ = len(loader)
 
 
@@ -217,15 +217,3 @@ def test_collate_fn_returns_record_batch(parquet_path):
     for rb in loader:
         assert isinstance(rb, pa.RecordBatch)
         assert len(rb) == 256
-
-
-def test_collate_fn_torch(parquet_path):
-    def collate_fn(batch):
-        return {col.name: torch.from_numpy(pa.array(col).to_numpy(zero_copy_only=False)) for col in batch.columns()}
-
-    ds = Dataset([parquet_path], columns=["f1", "label"])
-    loader = DataLoader(ds, batch_size=256, num_steps=4, collate_fn=collate_fn)
-
-    for batch in loader:
-        assert isinstance(batch["f1"], torch.Tensor)
-        assert isinstance(batch["label"], torch.Tensor)

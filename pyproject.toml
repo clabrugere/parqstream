@@ -10,17 +10,9 @@ requires-python = ">=3.11,<3.14"
 dependencies = ["numpy", "pyarrow"]
 
 [project.optional-dependencies]
-dev = ["maturin", "pytest", "torch"]
+dev = ["maturin", "pytest"]
 bench = ["maturin"]
 build_wheel = ["maturin[zig]"]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
