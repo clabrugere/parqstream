@@ -23,6 +23,7 @@ parqstream streams batches directly from Parquet files without loading the full 
 - **Multi-threaded prefetching** — worker threads read and decode chunks off the GIL while the main thread consumes the current buffer
 - **Approximate uniform shuffling** — combined row-group ordering and buffer shuffling without loading the full dataset
 - **Exact checkpointing** — capture and restore the iteration position to the row, including across restarts
+- **Distributed training** — partition the dataset across processes with `rank` / `world_size`; each rank gets a disjoint subset per epoch, with shuffle and checkpointing fully supported
 - **Framework-agnostic** — yields `dict[str, np.ndarray]` by default; pass a `collate_fn` for PyTorch tensors or any other format
 
 ---
@@ -122,6 +123,49 @@ for batch in loader:
     logits = model(batch["x"])  # torch.Tensor
 ```
 
+### Distributed training
+
+Use `rank` and `world_size` to partition the dataset across processes. Each rank iterates over a disjoint subset of row groups per epoch; together all ranks cover the full dataset exactly once. Shuffle and checkpointing work identically to the single-process case.
+
+```python
+import torch.distributed as dist
+from parqstream import Dataset, DataLoader
+
+dist.init_process_group("nccl")
+rank = dist.get_rank()
+world_size = dist.get_world_size()
+
+ds = Dataset(["train.parquet"])
+loader = DataLoader(
+    ds,
+    batch_size=4096,
+    num_steps=10_000,
+    shuffle=True,
+    seed=42,
+    rank=rank,
+    world_size=world_size,
+)
+
+for batch in loader:
+    train(batch)
+```
+
+The dataset is partitioned at the row-group level using a strided assignment: rank `r` takes positions `r, r+W, r+2W, …` from the epoch's visit order. This handles uneven splits (`num_row_groups % world_size ≠ 0`) without dropping data. `world_size` must not exceed the number of row groups so that every rank receives at least one.
+
+Checkpointing works per-rank — save and restore each rank's loader independently, using the same `rank` and `world_size`:
+
+```python
+# save
+torch.save({"model": model.state_dict(), "loader": loader.state_dict()}, f"ckpt_rank{rank}.pt")
+
+# restore
+state = torch.load(f"ckpt_rank{rank}.pt")
+model.load_state_dict(state["model"])
+loader.load_state_dict(state["loader"])
+```
+
+---
+
 ### Checkpointing
 
 Call `checkpoint()` at any point during iteration to capture the exact position, then resume on a new loader with `load_checkpoint()`. The same sequence of batches is reproduced from that point forward, as long as the loader is created with the same parameters and seed.
@@ -200,6 +244,8 @@ Iterator that yields batches. Internally spawns a multi-threaded pipeline: a fee
 | `buffer_size` | `int \| None` | total rows | Rows accumulated before slicing into batches. Controls memory usage and shuffle quality. |
 | `seed` | `int \| None` | `None` | RNG seed for reproducible shuffling and checkpointing. Required to resume from a checkpoint. |
 | `collate_fn` | `callable \| None` | `None` | Function `(Batch) -> any`. When set, its return value is yielded instead of `dict[str, np.ndarray]`. |
+| `rank` | `int` | `0` | This process's rank in a distributed setup (0-based). Together with `world_size`, selects which row groups this loader iterates over. |
+| `world_size` | `int` | `1` | Total number of processes. The dataset is partitioned into `world_size` disjoint subsets via strided assignment. Must not exceed the number of row groups. |
 
 | Method | Description |
 |--------|-------------|
@@ -332,5 +378,4 @@ maturin build --release --target x86_64-unknown-linux-gnu --zig
 ## Roadmap
 
 - Remote storage (S3, GCS, HTTPS) via presigned URLs with automatic refresh
-- Distributed training with `rank` / `world_size` partitioning
 - Parallel file validation and index construction at startup
