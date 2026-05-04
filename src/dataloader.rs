@@ -13,6 +13,64 @@ use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
 use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk, StreamCursor};
 
+#[derive(Debug, Copy, Clone)]
+pub struct DataLoaderConfig {
+    batch_size: usize,
+    num_steps: Option<usize>,
+    shuffle: bool,
+    num_workers: usize,
+    prefetch_factor: usize,
+    buffer_size: Option<usize>,
+    seed: u64,
+}
+
+impl DataLoaderConfig {
+    fn new(
+        batch_size: usize,
+        num_steps: Option<usize>,
+        shuffle: bool,
+        num_workers: usize,
+        prefetch_factor: usize,
+        buffer_size: Option<usize>,
+        seed: Option<u64>,
+    ) -> Result<Self> {
+        if batch_size == 0 {
+            return Err(Error::InvalidBatchSize(batch_size));
+        }
+        if num_steps == Some(0) {
+            return Err(Error::InvalidNumSteps(0));
+        }
+        if num_workers == 0 {
+            return Err(Error::InvalidNumWorkers(0));
+        }
+        if prefetch_factor == 0 {
+            return Err(Error::InvalidPrefetchFactor(0));
+        }
+        if buffer_size.is_some_and(|bs| bs < batch_size) {
+            return Err(Error::InvalidBufferSize(buffer_size.unwrap()));
+        }
+        let available_cores = thread::available_parallelism()
+            .map_err(Error::ParallelismUnavailable)?
+            .get();
+        Ok(Self {
+            batch_size,
+            num_steps,
+            shuffle,
+            num_workers: num_workers.min(available_cores).max(1),
+            prefetch_factor,
+            buffer_size,
+            seed: seed.unwrap_or_else(rand::random),
+        })
+    }
+
+    // Falls back to the full epoch size, then clamps up to batch_size so a fill is never smaller than one batch.
+    fn resolve_buffer_size(&self, rank_local_epoch_size: usize) -> usize {
+        self.buffer_size
+            .unwrap_or(rank_local_epoch_size)
+            .max(self.batch_size)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ShuffleConfig {
     pub shuffle: bool,
@@ -65,13 +123,7 @@ impl DataLoaderState {
 #[pyclass]
 pub struct DataLoader {
     dataset: Arc<Dataset>,
-    batch_size: usize,
-    num_steps: Option<usize>,
-    num_workers: usize,
-    prefetch_factor: usize,
-    buffer_size: Option<usize>,
-    shuffle: bool,
-    seed: u64,
+    config: DataLoaderConfig,
     dist_config: DistributedConfig,
     state: DataLoaderState,
     checkpoint: Option<Checkpoint>,
@@ -80,7 +132,7 @@ pub struct DataLoader {
 impl DataLoader {
     /// Per-epoch seed: varies each epoch so row-group and buffer shuffles differ across epochs.
     fn epoch_seed(&self) -> u64 {
-        self.seed + self.state.epoch as u64
+        self.config.seed + self.state.epoch as u64
     }
 
     /// Spawn the feeder and worker threads and return the batch receiver
@@ -98,12 +150,8 @@ impl DataLoader {
             .iter()
             .map(|&i| dataset.row_group_index[i].num_rows)
             .sum();
-        let buffer_size = self
-            .buffer_size
-            .unwrap_or(rank_local_epoch_size)
-            .max(self.batch_size);
-        let chunk_size = (buffer_size + self.num_workers - 1).div_ceil(self.num_workers);
-        let dist_config = self.dist_config;
+        let buffer_size = self.config.resolve_buffer_size(rank_local_epoch_size);
+        let chunk_size = buffer_size.div_ceil(self.config.num_workers);
 
         // Pre-compute row group layout for feeder
         let row_group_lengths = dataset
@@ -112,12 +160,14 @@ impl DataLoader {
             .map(|m| m.num_rows)
             .collect::<Vec<_>>();
 
-        let (chunk_tx, chunk_rx) = bounded::<Chunk>(self.num_workers * 2);
-        let (batch_tx, batch_rx) = bounded::<Result<RecordBatch>>(self.num_workers + 2);
-        let (prefetch_tx, prefetch_rx) = bounded::<Result<RecordBatch>>(self.prefetch_factor);
+        let (chunk_tx, chunk_rx) = bounded::<Chunk>(self.config.num_workers * 2);
+        let (batch_tx, batch_rx) = bounded::<Result<RecordBatch>>(self.config.num_workers + 2);
+        let (prefetch_tx, prefetch_rx) =
+            bounded::<Result<RecordBatch>>(self.config.prefetch_factor);
 
         // chunk feeder sending row group read tasks to workers
         let cursor = StreamCursor::from(cursor);
+        let dist_config = self.dist_config;
         thread::spawn(move || {
             chunk_dispatcher(
                 &chunk_tx,
@@ -130,7 +180,7 @@ impl DataLoader {
         });
 
         // workers read a contiguous chunk from a row group
-        for _ in 0..self.num_workers {
+        for _ in 0..self.config.num_workers {
             let chunk_rx = chunk_rx.clone();
             let data_tx = batch_tx.clone();
             let dataset = dataset.clone();
@@ -174,49 +224,26 @@ impl DataLoader {
         rank: usize,
         world_size: usize,
     ) -> Result<Self> {
-        if batch_size == 0 {
-            return Err(Error::InvalidBatchSize(batch_size));
-        }
-        if num_steps == Some(0) {
-            return Err(Error::InvalidNumSteps(0));
-        }
-        if num_workers == 0 {
-            return Err(Error::InvalidNumWorkers(0));
-        }
-        if prefetch_factor == 0 {
-            return Err(Error::InvalidPrefetchFactor(0));
-        }
-        if buffer_size.is_some_and(|bs| bs < batch_size) {
-            return Err(Error::InvalidBufferSize(buffer_size.unwrap()));
-        }
-        if world_size == 0 {
-            return Err(Error::InvalidWorldSize(0));
-        }
-        if rank >= world_size {
-            return Err(Error::InvalidRank { rank, world_size });
-        }
-        if world_size > 1 && dataset.row_group_index.len() < world_size {
+        let num_row_groups = dataset.row_group_index.len();
+        if world_size > 1 && num_row_groups < world_size {
             return Err(Error::WorldSizeTooLarge {
                 world_size,
-                num_row_groups: dataset.row_group_index.len(),
+                num_row_groups,
             });
         }
 
-        let available_cores = thread::available_parallelism()
-            .map_err(Error::ParallelismUnavailable)?
-            .get();
-        let seed = seed.unwrap_or_else(rand::random);
-
         Ok(Self {
             dataset: Arc::new(dataset.clone()),
-            batch_size,
-            num_steps,
-            num_workers: num_workers.min(available_cores).max(1),
-            prefetch_factor,
-            buffer_size,
-            shuffle,
-            seed,
-            dist_config: DistributedConfig { rank, world_size },
+            config: DataLoaderConfig::new(
+                batch_size,
+                num_steps,
+                shuffle,
+                num_workers,
+                prefetch_factor,
+                buffer_size,
+                seed,
+            )?,
+            dist_config: DistributedConfig::new(rank, world_size)?,
             state: DataLoaderState::default(),
             checkpoint: None,
         })
@@ -234,10 +261,14 @@ impl DataLoader {
                 checkpoint.steps_remaining,
                 checkpoint.cursor,
             ),
-            None => (slf.epoch_seed(), slf.num_steps, CheckpointCursor::default()),
+            None => (
+                slf.epoch_seed(),
+                slf.config.num_steps,
+                CheckpointCursor::default(),
+            ),
         };
         let shuffle_config = ShuffleConfig {
-            shuffle: slf.shuffle,
+            shuffle: slf.config.shuffle,
             seed,
         };
         let prefetch_rx = slf.spawn_pipeline(shuffle_config, &cursor);
@@ -256,7 +287,7 @@ impl DataLoader {
 
     /// Return the next `Batch`, or raise `StopIteration` when the pipeline is exhausted.
     pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> Result<Batch> {
-        let batch_size = slf.batch_size;
+        let batch_size = slf.config.batch_size;
         let state = &mut slf.state;
 
         let Some(buffer) = state.buffer.as_mut() else {
@@ -290,7 +321,7 @@ impl DataLoader {
         }
 
         let shuffle_config = ShuffleConfig {
-            shuffle: self.shuffle,
+            shuffle: self.config.shuffle,
             seed: self.state.iteration_seed,
         };
 
@@ -329,7 +360,7 @@ impl DataLoader {
     }
 
     pub fn __len__(&self) -> Result<usize> {
-        self.num_steps.ok_or_else(|| Error::UndefinedLength)
+        self.config.num_steps.ok_or_else(|| Error::UndefinedLength)
     }
 
     pub fn __repr__(&self) -> String {
@@ -337,13 +368,13 @@ impl DataLoader {
             "DataLoader(rows={}, columns={:?}, batch_size={}, num_steps={:?}, shuffle={}, seed={}, num_workers={}, prefetch_factor={}, buffer_size={:?}, rank={}, world_size={})",
             self.dataset.total_rows,
             self.dataset.columns,
-            self.batch_size,
-            self.num_steps,
-            self.shuffle,
-            self.seed,
-            self.num_workers,
-            self.prefetch_factor,
-            self.buffer_size,
+            self.config.batch_size,
+            self.config.num_steps,
+            self.config.shuffle,
+            self.config.seed,
+            self.config.num_workers,
+            self.config.prefetch_factor,
+            self.config.buffer_size,
             self.dist_config.rank,
             self.dist_config.world_size,
         )

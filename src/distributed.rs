@@ -4,6 +4,7 @@ use rand::SeedableRng;
 
 use crate::dataloader::ShuffleConfig;
 use crate::dataset::RowGroupMeta;
+use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, Copy)]
 pub struct DistributedConfig {
@@ -23,6 +24,16 @@ impl Default for DistributedConfig {
 }
 
 impl DistributedConfig {
+    pub fn new(rank: usize, world_size: usize) -> Result<Self> {
+        if world_size == 0 {
+            return Err(Error::InvalidWorldSize(0));
+        }
+        if rank >= world_size {
+            return Err(Error::InvalidRank { rank, world_size });
+        }
+        Ok(Self { rank, world_size })
+    }
+
     /// Build the visit order for a specific epoch: globally shuffle (if enabled) then
     /// retain only this rank's strided positions. `world_size=1` returns all groups unchanged.
     pub fn epoch_order(
