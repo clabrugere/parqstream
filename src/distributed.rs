@@ -13,8 +13,6 @@ pub struct DistributedConfig {
 }
 
 impl Default for DistributedConfig {
-    // Manual impl required: usize's derived Default is 0, which would produce
-    // the invalid `world_size=0`. The identity (single-process) config is rank=0, world_size=1.
     fn default() -> Self {
         Self {
             rank: 0,

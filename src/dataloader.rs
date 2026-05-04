@@ -46,7 +46,7 @@ impl DataLoaderConfig {
         if prefetch_factor == 0 {
             return Err(Error::InvalidPrefetchFactor(0));
         }
-        if buffer_size.is_some_and(|bs| bs < batch_size) {
+        if buffer_size.is_some_and(|buffer_size| buffer_size < batch_size) {
             return Err(Error::InvalidBufferSize(buffer_size.unwrap()));
         }
         let available_cores = thread::available_parallelism()
