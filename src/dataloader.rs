@@ -11,7 +11,9 @@ use crate::checkpoint::{Checkpoint, CheckpointCursor};
 use crate::dataset::Dataset;
 use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
-use crate::pipeline::{chunk_collector, chunk_dispatcher, chunk_reader, Chunk, StreamCursor};
+use crate::pipeline::{
+    chunk_collector, chunk_dispatcher, chunk_reader, reorder_batch, Chunk, StreamCursor,
+};
 
 #[derive(Debug, Copy, Clone)]
 pub struct DataLoaderConfig {
@@ -110,8 +112,9 @@ impl DataLoaderState {
 /// Calling `__iter__` (or iterating with a for loop) starts:
 /// 1. a thread that emits row-group metadata chunks to a reader channel (`chunk_dispatcher`)
 /// 2. `num_workers` threads that receive metadata from the chunk dispatcher, load them from disk and send them to a data channel (`chunk_reader`)
-/// 3. a thread that collects chunks from the data channel until it has > `buffer_size` rows, concatenates them into a fill, and sends it to a fill channel (`chunk_collector`)
-/// 4. the main thread reads fills from the fill channel via a `Buffer`, which optionally shuffles each fill
+/// 3. a thread that reorders completed chunks back into dispatch order using a ring buffer (`reorder_batch`)
+/// 4. a thread that collects ordered chunks until it has > `buffer_size` rows, concatenates them into a fill, and sends it to a fill channel (`chunk_collector`)
+/// 5. the main thread reads fills from the fill channel via a `Buffer`, which optionally shuffles each fill
 ///    and slices it into `batch_size` batches; any unconsumed rows from the previous fill are prepended so
 ///    batches never straddle a fill boundary with a gap
 ///
@@ -161,7 +164,9 @@ impl DataLoader {
             .collect::<Vec<_>>();
 
         let (chunk_tx, chunk_rx) = bounded::<Chunk>(self.config.num_workers * 2);
-        let (batch_tx, batch_rx) = bounded::<Result<RecordBatch>>(self.config.num_workers + 2);
+        let (batch_tx, batch_rx) =
+            bounded::<Result<(usize, RecordBatch)>>(self.config.num_workers + 2);
+        let (ordered_tx, ordered_rx) = bounded::<Result<RecordBatch>>(self.config.num_workers + 2);
         let (prefetch_tx, prefetch_rx) =
             bounded::<Result<RecordBatch>>(self.config.prefetch_factor);
 
@@ -186,11 +191,16 @@ impl DataLoader {
             let dataset = dataset.clone();
             thread::spawn(move || chunk_reader(&chunk_rx, &data_tx, &dataset));
         }
-        drop(batch_tx);
+        drop(batch_tx); // original instance wasn't moved, so drop it to avoid a leak
+
+        // reorder out-of-order batches by dispatch id before they reach the collector
+        // capacity matches the total in-flight budget (chunk_tx + workers + batch_tx) so no slot is ever reused
+        let capacity = 4 * self.config.num_workers + 2;
+        thread::spawn(move || reorder_batch(&batch_rx, &ordered_tx, capacity));
 
         // collect chunks until > buffer_size rows, then concatenate and send to batch buffer
         let schema = dataset.projected_schema.clone();
-        thread::spawn(move || chunk_collector(&batch_rx, &prefetch_tx, &schema, buffer_size));
+        thread::spawn(move || chunk_collector(&ordered_rx, &prefetch_tx, &schema, buffer_size));
 
         prefetch_rx
     }

@@ -6,6 +6,7 @@ mod dataset;
 mod distributed;
 mod error;
 mod pipeline;
+mod ring_buffer;
 
 use pyo3::prelude::*;
 

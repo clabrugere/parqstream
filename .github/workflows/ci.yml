@@ -32,10 +32,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      - name: Run Rust tests
+        run: cargo test
+
       - name: Build and install with maturin
         run: uv run maturin develop
 
-      - name: Run tests
+      - name: Run Python tests
         run: uv run pytest python/tests
 
   clippy:
