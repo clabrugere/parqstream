@@ -231,7 +231,7 @@ Reads Parquet metadata from all files, validates that schemas match, and builds 
 
 ### `DataLoader(dataset, batch_size, ...)`
 
-Iterator that yields batches. Internally spawns a multi-threaded pipeline: a feeder thread emits row-group read tasks, `num_workers` threads read and decode chunks off the GIL, a collector thread assembles chunks into buffers, and the main thread slices buffers into batches.
+Iterator that yields batches. Internally spawns a multi-threaded pipeline: a feeder thread emits row-group read tasks, `num_workers` threads read and decode chunks off the GIL, a reorder thread restores dispatch order, a collector thread assembles chunks into buffers, and the main thread slices buffers into batches.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -295,11 +295,13 @@ Opaque object returned by `DataLoader.checkpoint()`. Captures training epoch, st
 ```
 Dataset ──► DataLoader
                │
-               ├── chunk_feeder      emits row-group tasks (optionally shuffled per epoch)
+               ├── chunk_dispatcher  emits row-group tasks (optionally shuffled per epoch)
                │
                ├── worker × N        reads and decodes chunks from disk, off the GIL
                │
-               ├── chunk_collector   assembles chunks into buffers of buffer_size rows
+               ├── reorder_batch     restores dispatch order via a ring buffer (workers may finish out of order)
+               │
+               ├── chunk_collector   assembles ordered chunks into buffers of buffer_size rows
                │
                └── Buffer            shuffles each buffer, slices into batch_size batches
                                      ↕ prefetch_factor buffers prepared ahead
