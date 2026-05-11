@@ -403,7 +403,7 @@ mod tests {
             ordered_tx.send(Ok(make_rows(&rows))).unwrap();
             drop(ordered_tx);
             thread::spawn(move || {
-                buffer_builder(&ordered_rx, &buffer_tx, &schema, 100, shuffle_cfg, offset)
+                buffer_builder(&ordered_rx, &buffer_tx, &schema, 100, shuffle_cfg, offset);
             });
             batch_values(&buffer_rx.recv().unwrap().unwrap())
         };
