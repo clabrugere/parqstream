@@ -49,7 +49,7 @@ impl Buffer {
 
     /// Fetches the next stitched buffer from the pipeline, blocking until it is ready.
     fn refill(&mut self) -> Result<bool> {
-        // Send the current tail BEFORE blocking on ready_rx — the stitcher already has the next
+        // Send the current tail BEFORE blocking on ready_rx: the stitcher already has the next
         // buffer pre-fetched and only needs the tail to complete the stitch.
         if let Some(data) = &self.data {
             let tail = (self.offset < data.num_rows())

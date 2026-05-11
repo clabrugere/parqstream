@@ -19,12 +19,12 @@
 
 parqstream streams batches directly from Parquet files without loading the full dataset into memory. It is built in Rust with Python bindings, and designed to keep your GPU saturated while consuming constant memory regardless of dataset size.
 
-- **Zero-copy transfer** — dense numeric columns are transferred to Python via the Arrow PyCapsule Interface with no data copy
-- **Multi-threaded prefetching** — worker threads read and decode chunks off the GIL while the main thread consumes the current buffer
-- **Approximate uniform shuffling** — combined row-group ordering and buffer shuffling without loading the full dataset
-- **Exact checkpointing** — capture and restore the iteration position to the row, including across restarts
-- **Distributed training** — partition the dataset across processes with `rank` / `world_size`; each rank gets a disjoint subset per epoch, with shuffle and checkpointing fully supported
-- **Framework-agnostic** — yields `dict[str, np.ndarray]` by default; pass a `collate_fn` for PyTorch tensors or any other format
+- **Zero-copy transfer**: dense numeric columns are transferred to Python via the Arrow PyCapsule Interface with no data copy
+- **Multi-threaded prefetching**: worker threads read and decode chunks off the GIL while the main thread consumes the current buffer
+- **Approximate uniform shuffling**: combined row-group ordering and buffer shuffling without loading the full dataset
+- **Exact checkpointing**: capture and restore the iteration position to the row, including across restarts
+- **Distributed training**: partition the dataset across processes with `rank` / `world_size`; each rank gets a disjoint subset per epoch, with shuffle and checkpointing fully supported
+- **Framework-agnostic**: yields `dict[str, np.ndarray]` by default; pass a `collate_fn` for PyTorch tensors or any other format
 
 ---
 
@@ -83,7 +83,7 @@ for batch in loader:
 
 ### Shuffled, indefinite cycling
 
-Pass `num_steps=None` (the default) to cycle the dataset indefinitely — useful for training loops that count steps rather than epochs. Set `shuffle=True` for approximate uniform random sampling: row groups are visited in a random order each epoch, and each buffer is shuffled before being sliced into batches.
+Pass `num_steps=None` (the default) to cycle the dataset indefinitely. Useful for training loops that count steps rather than epochs. Set `shuffle=True` for approximate uniform random sampling: row groups are visited in a random order each epoch, and each buffer is shuffled before being sliced into batches.
 
 ```python
 loader = DataLoader(
@@ -152,7 +152,7 @@ for batch in loader:
 
 The dataset is partitioned at the row-group level using a strided assignment: rank `r` takes positions `r, r+W, r+2W, …` from the epoch's visit order. This handles uneven splits (`num_row_groups % world_size ≠ 0`) without dropping data. `world_size` must not exceed the number of row groups so that every rank receives at least one.
 
-Checkpointing works per-rank — save and restore each rank's loader independently, using the same `rank` and `world_size`:
+Checkpointing works per-rank. Save and restore each rank's loader independently, using the same `rank` and `world_size`:
 
 ```python
 # save
@@ -235,8 +235,8 @@ Iterator that yields batches. Internally spawns a multi-threaded pipeline: a tas
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `dataset` | `Dataset` | — | Source dataset. |
-| `batch_size` | `int` | — | Number of rows per batch. |
+| `dataset` | `Dataset` | / | Source dataset. |
+| `batch_size` | `int` | / | Number of rows per batch. |
 | `num_steps` | `int \| None` | `None` | Total batches to yield. `None` cycles indefinitely. |
 | `shuffle` | `bool` | `False` | Shuffle row-group visit order and each buffer for approximate uniform random sampling. |
 | `num_workers` | `int` | `4` | Number of parallel reader threads. |
@@ -308,7 +308,7 @@ Dataset ──► DataLoader
                └── Buffer            slices the stitched buffer into batch_size batches, off the GIL
 ```
 
-Columns are returned to Python via the Arrow PyCapsule Interface — zero-copy for dense numeric types, one copy otherwise.
+Columns are returned to Python via the Arrow PyCapsule Interface: zero-copy for dense numeric types, one copy otherwise.
 
 ---
 
@@ -344,7 +344,7 @@ Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 fl
 | data pipeline overhead | **0.9%** |
 | compute time per step | 2.42 s |
 
-The data pipeline accounts for less than 1% of step time — the GPU stays fully saturated.
+The data pipeline accounts for less than 1% of step time, the GPU stays fully saturated.
 
 To reproduce:
 

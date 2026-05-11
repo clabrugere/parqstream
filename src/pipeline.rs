@@ -385,8 +385,8 @@ mod tests {
 
     // ── buffer_builder ───────────────────────────────────────────────────────
 
-    // Verifies that different seed_offsets produce different permutations — the mechanism
-    // Python shuffle tests can't inspect directly since they only observe batch values.
+    // Verifies that different seed_offsets produce different permutations.
+    // Python shuffle tests can't inspect that directly since they only observe batch values.
     #[test]
     fn test_buffer_builder_shuffle_advances_seed_per_buffer() {
         let rows: Vec<i32> = (0..100).collect();
