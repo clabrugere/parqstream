@@ -168,14 +168,14 @@ impl DataLoader {
         let (buffer_tx, prefetch_rx) = bounded::<Result<RecordBatch>>(self.config.prefetch_factor);
 
         // prepare and sends read tasks to workers
-        let cursor = StreamCursor::from(cursor);
         let dist_config = self.dist_config;
+        let stream_cursor = StreamCursor::from(cursor);
         thread::spawn(move || {
             task_dispatcher(
                 &task_tx,
                 &row_group_lengths,
                 chunk_size,
-                cursor,
+                stream_cursor,
                 shuffle_config,
                 dist_config,
             );
@@ -197,7 +197,17 @@ impl DataLoader {
 
         // collect chunks until > buffer_size rows, then concatenate and send to batch buffer
         let schema = dataset.projected_schema.clone();
-        thread::spawn(move || buffer_builder(&ordered_rx, &buffer_tx, &schema, buffer_size));
+        let seed_offset = cursor.refill_count;
+        thread::spawn(move || {
+            buffer_builder(
+                &ordered_rx,
+                &buffer_tx,
+                &schema,
+                buffer_size,
+                shuffle_config,
+                seed_offset,
+            );
+        });
 
         prefetch_rx
     }
@@ -279,12 +289,7 @@ impl DataLoader {
             seed,
         };
         let prefetch_rx = slf.spawn_pipeline(shuffle_config, &cursor);
-        let buffer = Buffer::new(
-            prefetch_rx,
-            shuffle_config,
-            cursor.refill_count,
-            cursor.buffer_offset,
-        );
+        let buffer = Buffer::new(prefetch_rx, cursor.refill_count, cursor.buffer_offset);
 
         slf.state
             .new_iteration(seed, buffer, steps_remaining, cursor.rows_epoch_start);

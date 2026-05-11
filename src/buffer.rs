@@ -1,32 +1,9 @@
-use std::result::Result as StdResult;
-
-use arrow::array::UInt32Array;
-use arrow::compute::{concat_batches, take};
+use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use crossbeam_channel::Receiver;
 use pyo3::Python;
-use rand::rngs::SmallRng;
-use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
 
-use crate::dataloader::ShuffleConfig;
 use crate::error::Result;
-
-/// Returns a copy of `buffer` with all rows randomly permuted using `rng`.
-pub fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<RecordBatch> {
-    let n = u32::try_from(buffer.num_rows())?;
-    let mut indices = (0..n).collect::<Vec<_>>();
-    indices.shuffle(rng);
-
-    let idx_arr = UInt32Array::from(indices);
-    let columns = buffer
-        .columns()
-        .iter()
-        .map(|col| take(col, &idx_arr, None))
-        .collect::<StdResult<_, _>>()?;
-
-    Ok(RecordBatch::try_new(buffer.schema(), columns)?)
-}
 
 /// Point-in-time view of a [`Buffer`], used by checkpoint to reconstruct the resume position.
 #[derive(Debug, Default)]
@@ -43,7 +20,6 @@ pub struct BufferSnapshot {
 #[derive(Debug)]
 pub struct Buffer {
     rx: Receiver<Result<RecordBatch>>,
-    shuffle_config: ShuffleConfig,
     data: Option<RecordBatch>,
     offset: usize,
     /// Incremented after each refill; the nth fill is shuffled with `SmallRng(seed + seed_offset_at_that_fill)`.
@@ -57,28 +33,16 @@ pub struct Buffer {
 impl Buffer {
     pub fn new(
         rx: Receiver<Result<RecordBatch>>,
-        shuffle_config: ShuffleConfig,
         seed_offset: usize,
         resume_offset: usize,
     ) -> Self {
         Self {
             rx,
-            shuffle_config,
             data: None,
             offset: 0,
             seed_offset,
             resume_offset,
             tail_size: 0,
-        }
-    }
-
-    fn maybe_shuffle(&self, batch: RecordBatch) -> Result<RecordBatch> {
-        if self.shuffle_config.shuffle {
-            let mut rng =
-                SmallRng::seed_from_u64(self.shuffle_config.seed + self.seed_offset as u64);
-            shuffle_buffer(&batch, &mut rng)
-        } else {
-            Ok(batch)
         }
     }
 
@@ -88,8 +52,7 @@ impl Buffer {
             .is_none_or(|batch| self.offset + num_rows > batch.num_rows())
     }
 
-    /// Fetches the next fill, prepending any unconsumed tail from the previous fill. The tail keeps
-    /// its previous shuffle order; only the fresh data is shuffled with the new seed.
+    /// Fetches the next fill, prepending any unconsumed tail from the previous fill.
     fn refill(&mut self, py: Python<'_>) -> Result<bool> {
         let remaining_rows = self.data.as_ref().and_then(|data| {
             (self.offset < data.num_rows())
@@ -98,7 +61,6 @@ impl Buffer {
 
         match py.detach(|| self.rx.recv()) {
             Ok(Ok(next)) => {
-                let next = self.maybe_shuffle(next)?;
                 // Record tail size before stitching so checkpoint.rs can locate the fresh-data boundary.
                 self.tail_size = remaining_rows.as_ref().map_or(0, RecordBatch::num_rows);
                 self.data = Some(match remaining_rows {

@@ -1,7 +1,12 @@
-use arrow::array::RecordBatch;
-use arrow::compute::concat_batches;
+use std::result::Result as StdResult;
+
+use arrow::array::{RecordBatch, UInt32Array};
+use arrow::compute::{concat_batches, take};
 use arrow::datatypes::SchemaRef;
 use crossbeam_channel::{Receiver, Sender};
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
 
 use crate::checkpoint::CheckpointCursor;
 use crate::dataloader::ShuffleConfig;
@@ -152,17 +157,37 @@ pub fn reorder_batch(
     }
 }
 
+/// Returns a copy of `buffer` with all rows randomly permuted using `rng`.
+fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<RecordBatch> {
+    let n = u32::try_from(buffer.num_rows())?;
+    let mut indices = (0..n).collect::<Vec<_>>();
+    indices.shuffle(rng);
+
+    let idx_arr = UInt32Array::from(indices);
+    let columns = buffer
+        .columns()
+        .iter()
+        .map(|col| take(col, &idx_arr, None))
+        .collect::<StdResult<_, _>>()?;
+
+    Ok(RecordBatch::try_new(buffer.schema(), columns)?)
+}
+
 /// Accumulates batches from `ordered_rx` until `buffer_size` rows are gathered, concatenates them into one fill,
-/// and sends it to `buffer_tx`.
+/// optionally shuffles it, and sends it to `buffer_tx`.
 pub fn buffer_builder(
     ordered_rx: &Receiver<Result<RecordBatch>>,
     buffer_tx: &Sender<Result<RecordBatch>>,
     schema: &SchemaRef,
     buffer_size: usize,
+    shuffle_config: ShuffleConfig,
+    seed_offset: usize,
 ) {
+    let mut seed_offset = seed_offset as u64;
     loop {
         let mut parts: Vec<RecordBatch> = Vec::new();
         let mut rows = 0;
+        // accumulate batches until we have enough to fill a buffer
         while rows < buffer_size {
             match ordered_rx.recv() {
                 Ok(Ok(chunk_data)) => {
@@ -176,15 +201,25 @@ pub fn buffer_builder(
                 Err(_) => return, // consumer dropped
             }
         }
+        // build the buffer batch by concatenating the accumulated parts and optionally shuffle
         let buffer = match concat_batches(schema, &parts) {
-            Ok(buffer) => buffer,
+            Ok(buffer) => {
+                if shuffle_config.shuffle {
+                    let mut rng = SmallRng::seed_from_u64(shuffle_config.seed + seed_offset);
+                    shuffle_buffer(&buffer, &mut rng)
+                } else {
+                    Ok(buffer)
+                }
+            }
             Err(e) => {
                 let _ = buffer_tx.send(Err(e.into()));
                 return; // error concatenating batches
             }
         };
-        if buffer_tx.send(Ok(buffer)).is_err() {
-            return; // consumer dropped
+        // send to consumer and advance the seed for the next fill; if the consumer has dropped, stop producing
+        match buffer_tx.send(buffer) {
+            Ok(()) => seed_offset += 1, // only advance the seed if the buffer was successfully sent
+            Err(_) => return,           // consumer dropped
         }
     }
 }
