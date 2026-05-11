@@ -1,9 +1,7 @@
-use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
-use crossbeam_channel::Receiver;
-use pyo3::Python;
 
 use crate::error::Result;
+use crate::pipeline::{Pipeline, StitchedBuffer};
 
 /// Point-in-time view of a [`Buffer`], used by checkpoint to reconstruct the resume position.
 #[derive(Debug, Default)]
@@ -15,14 +13,15 @@ pub struct BufferSnapshot {
     pub tail_size: usize,
 }
 
-/// Wraps the buffer receiver and serves row slices of a requested size. Each fill is optionally
-/// shuffled; unconsumed rows from the previous fill are stitched to the front of the next.
+/// Wraps the `Pipeline` receiver and serves row slices of a requested size.
+/// Unconsumed rows from the previous buffer are stitched to the front of the next by the
+/// `buffer_stitcher` thread; this struct owns the channels used for that handshake.
 #[derive(Debug)]
 pub struct Buffer {
-    rx: Receiver<Result<RecordBatch>>,
+    pipeline: Pipeline,
     data: Option<RecordBatch>,
     offset: usize,
-    /// Incremented after each refill; the nth fill is shuffled with `SmallRng(seed + seed_offset_at_that_fill)`.
+    /// Incremented after each refill; the nth buffer is shuffled with `SmallRng(seed + seed_offset_at_that_refill)`.
     seed_offset: usize,
     /// Applied once on the first refill to skip into a partially-consumed buffer (checkpoint resume).
     resume_offset: usize,
@@ -31,13 +30,10 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    pub fn new(
-        rx: Receiver<Result<RecordBatch>>,
-        seed_offset: usize,
-        resume_offset: usize,
-    ) -> Self {
+    pub fn new(pipeline: Pipeline, seed_offset: usize, resume_offset: usize) -> Self {
+        let _ = pipeline.tail_tx.send(None); // ensure the tail channel is initialized for the first refill
         Self {
-            rx,
+            pipeline,
             data: None,
             offset: 0,
             seed_offset,
@@ -52,38 +48,33 @@ impl Buffer {
             .is_none_or(|batch| self.offset + num_rows > batch.num_rows())
     }
 
-    /// Fetches the next fill, prepending any unconsumed tail from the previous fill.
-    fn refill(&mut self, py: Python<'_>) -> Result<bool> {
-        let remaining_rows = self.data.as_ref().and_then(|data| {
-            (self.offset < data.num_rows())
-                .then(|| data.slice(self.offset, data.num_rows() - self.offset))
-        });
+    /// Fetches the next stitched buffer from the pipeline, blocking until it is ready.
+    fn refill(&mut self) -> Result<bool> {
+        // Send the current tail BEFORE blocking on ready_rx — the stitcher already has the next
+        // buffer pre-fetched and only needs the tail to complete the stitch.
+        if let Some(data) = &self.data {
+            let tail = (self.offset < data.num_rows())
+                .then(|| data.slice(self.offset, data.num_rows() - self.offset));
+            let _ = self.pipeline.tail_tx.send(tail);
+        }
 
-        match py.detach(|| self.rx.recv()) {
-            Ok(Ok(next)) => {
-                // Record tail size before stitching so checkpoint.rs can locate the fresh-data boundary.
-                self.tail_size = remaining_rows.as_ref().map_or(0, RecordBatch::num_rows);
-                self.data = Some(match remaining_rows {
-                    Some(remaining_rows) => {
-                        concat_batches(&next.schema(), &[remaining_rows, next])?
-                    }
-                    None => next,
-                });
-                // resume_offset is non-zero only on the first refill after a checkpoint restore;
-                // it skips past the tail portion that cannot be reconstructed on resume.
+        match self.pipeline.ready_rx.recv() {
+            Ok(Ok(StitchedBuffer { data, tail_size })) => {
+                self.tail_size = tail_size;
+                self.data = Some(data);
                 self.offset = self.resume_offset;
                 self.resume_offset = 0;
                 self.seed_offset += 1;
                 Ok(true)
             }
-            Ok(Err(e)) => Err(e), // upstream error
-            Err(_) => Ok(false),  // channel closed, no more batches
+            Ok(Err(e)) => Err(e),
+            Err(_) => Ok(false), // channel closed = exhausted
         }
     }
 
     /// Returns the next `num_rows` rows, triggering a refill if needed. Returns `None` when the channel is closed.
-    pub fn take(&mut self, num_rows: usize, py: Python<'_>) -> Result<Option<RecordBatch>> {
-        if self.need_refill(num_rows) && !self.refill(py)? {
+    pub fn take(&mut self, num_rows: usize) -> Result<Option<RecordBatch>> {
+        if self.need_refill(num_rows) && !self.refill()? {
             return Ok(None);
         }
 

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread;
 
 use arrow::record_batch::RecordBatch;
-use crossbeam_channel::{bounded, Receiver};
+use crossbeam_channel::bounded;
 use pyo3::prelude::*;
 
 use crate::batch::Batch;
@@ -12,7 +12,8 @@ use crate::dataset::Dataset;
 use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
 use crate::pipeline::{
-    buffer_builder, chunk_reader, reorder_batch, task_dispatcher, ReadTask, StreamCursor,
+    buffer_builder, buffer_stitcher, chunk_reader, reorder_batch, task_dispatcher, Pipeline,
+    ReadTask, StitchedBuffer, StreamCursor,
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -111,13 +112,16 @@ impl DataLoaderState {
 ///
 /// Calling `__iter__` (or iterating with a for loop) starts:
 /// 1. a thread that emits row-group metadata read tasks to a task channel (`task_dispatcher`)
-/// 2. `num_workers` threads that receive metadata from the task dispatcher, load them from disk and send them to a data channel (`batch_reader`)
-/// 3. a thread that reorders completed tasks back into dispatch order using a ring buffer (`reorder_batch`)
-/// 4. a thread that collects ordered completed tasks until it has > `buffer_size` rows, concatenates them, and sends it to a buffer channel (`buffer_builder`)
-/// 5. the main thread reads a buffer from the buffer channel, optionally shuffled and slices it into `batch_size`
-///    batches; any unconsumed rows from the previous fill are prepended so batches never straddle a fill boundary with a gap
+/// 2. `num_workers` threads that receive tasks, load chunks from disk and send them to a data channel (`chunk_reader`)
+/// 3. a thread that reorders completed chunks back into dispatch order using a ring buffer (`reorder_batch`)
+/// 4. a thread that accumulates ordered chunks until it has >= `buffer_size` rows, concatenates
+///    and optionally shuffles them, and sends the assembled buffer to `buffer_builder`
+/// 5. a thread that pre-fetches the next assembled buffer, waits for the unconsumed tail of the
+///    current buffer from the main thread, prepends it, and delivers a `StitchedBuffer` (`buffer_stitcher`)
+/// 6. the main thread receives stitched buffers and slices them into `batch_size` batches;
+///    the GIL is released for the entire receive-and-slice operation
 ///
-/// Up to `prefetch_factor` buffers can be prepared, and the GIL is released while waiting to allow the background threads to run.
+/// Up to `prefetch_factor` assembled buffers can be queued between stages 4 and 5.
 ///
 /// The iterator runs for exactly `num_steps` batches, then raises `StopIteration`.
 /// Dropping or garbage-collecting the `DataLoader` signals the background threads to stop early.
@@ -137,11 +141,7 @@ impl DataLoader {
     }
 
     /// Spawn the feeder and worker threads and return the batch receiver
-    fn spawn_pipeline(
-        &self,
-        shuffle_config: ShuffleConfig,
-        cursor: &CheckpointCursor,
-    ) -> Receiver<Result<RecordBatch>> {
+    fn spawn_pipeline(&self, shuffle_config: ShuffleConfig, cursor: &CheckpointCursor) -> Pipeline {
         let dataset = self.dataset.clone();
         // Default to the rank-local epoch size so a single buffer fill never spans two epochs.
         // For world_size=1 this equals dataset.total_rows (same as before).
@@ -161,11 +161,14 @@ impl DataLoader {
             .map(|m| m.num_rows)
             .collect::<Vec<_>>();
 
+        // declare all the channels
         let (task_tx, task_rx) = bounded::<ReadTask>(self.config.num_workers * 2);
         let (batch_tx, batch_rx) =
             bounded::<Result<(usize, RecordBatch)>>(self.config.num_workers + 2);
         let (ordered_tx, ordered_rx) = bounded::<Result<RecordBatch>>(self.config.num_workers + 2);
-        let (buffer_tx, prefetch_rx) = bounded::<Result<RecordBatch>>(self.config.prefetch_factor);
+        let (buffer_tx, buffer_rx) = bounded::<Result<RecordBatch>>(self.config.prefetch_factor);
+        let (tail_tx, tail_rx) = bounded::<Option<RecordBatch>>(1);
+        let (ready_tx, ready_rx) = bounded::<Result<StitchedBuffer>>(1);
 
         // prepare and sends read tasks to workers
         let dist_config = self.dist_config;
@@ -184,9 +187,9 @@ impl DataLoader {
         // workers read a contiguous chunk from a row group
         for _ in 0..self.config.num_workers {
             let task_rx = task_rx.clone();
-            let buffer_tx = batch_tx.clone();
+            let batch_tx = batch_tx.clone();
             let dataset = dataset.clone();
-            thread::spawn(move || chunk_reader(&task_rx, &buffer_tx, &dataset));
+            thread::spawn(move || chunk_reader(&task_rx, &batch_tx, &dataset));
         }
         drop(batch_tx); // original instance wasn't moved, so drop it to avoid a leak
 
@@ -209,7 +212,11 @@ impl DataLoader {
             );
         });
 
-        prefetch_rx
+        // stitch the tail of the previous buffer to the front of the next one, and signal when a stitched buffer is ready for consumption
+        let schema = dataset.projected_schema.clone();
+        thread::spawn(move || buffer_stitcher(&buffer_rx, &tail_rx, &ready_tx, &schema));
+
+        Pipeline { ready_rx, tail_tx }
     }
 }
 
@@ -288,8 +295,8 @@ impl DataLoader {
             shuffle: slf.config.shuffle,
             seed,
         };
-        let prefetch_rx = slf.spawn_pipeline(shuffle_config, &cursor);
-        let buffer = Buffer::new(prefetch_rx, cursor.refill_count, cursor.buffer_offset);
+        let pipeline = slf.spawn_pipeline(shuffle_config, &cursor);
+        let buffer = Buffer::new(pipeline, cursor.refill_count, cursor.buffer_offset);
 
         slf.state
             .new_iteration(seed, buffer, steps_remaining, cursor.rows_epoch_start);
@@ -308,7 +315,7 @@ impl DataLoader {
         if state.steps_remaining == Some(0) {
             return Err(Error::DataLoaderConsumed);
         }
-        match buffer.take(batch_size, py) {
+        match py.detach(|| buffer.take(batch_size)) {
             Ok(Some(batch)) => {
                 if let Some(steps_remaining) = state.steps_remaining.as_mut() {
                     *steps_remaining -= 1;

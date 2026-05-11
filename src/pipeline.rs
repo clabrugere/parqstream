@@ -50,6 +50,23 @@ impl From<&CheckpointCursor> for StreamCursor {
     }
 }
 
+/// Channels connecting the `buffer_stitcher` thread to the main-thread `Buffer`.
+/// Returned by `spawn_pipeline`; owned by `Buffer`.
+#[derive(Debug)]
+pub struct Pipeline {
+    pub ready_rx: Receiver<Result<StitchedBuffer>>,
+    pub tail_tx: Sender<Option<RecordBatch>>,
+}
+
+/// A buffer delivered by `buffer_stitcher`: the assembled and shuffled `RecordBatch` with the
+/// tail from the previous buffer prepended, plus `tail_size` (number of prepended rows) for
+/// checkpoint accounting.
+#[derive(Debug)]
+pub struct StitchedBuffer {
+    pub data: RecordBatch,
+    pub tail_size: usize,
+}
+
 /// A read task: a contiguous slice of `num_rows` rows at `start_row` within a single row group.
 #[derive(Debug)]
 pub struct ReadTask {
@@ -173,8 +190,10 @@ fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<RecordBatc
     Ok(RecordBatch::try_new(buffer.schema(), columns)?)
 }
 
-/// Accumulates batches from `ordered_rx` until `buffer_size` rows are gathered, concatenates them into one fill,
-/// optionally shuffles it, and sends it to `buffer_tx`.
+/// Accumulates ordered batches from `ordered_rx` until `buffer_size` rows are gathered,
+/// concatenates them into one `RecordBatch`, optionally shuffles it with a deterministic seed
+/// derived from `shuffle_config.seed + seed_offset`, and sends it to `buffer_tx`.
+/// `seed_offset` is incremented after each successful send so every buffer gets a unique seed.
 pub fn buffer_builder(
     ordered_rx: &Receiver<Result<RecordBatch>>,
     buffer_tx: &Sender<Result<RecordBatch>>,
@@ -224,6 +243,54 @@ pub fn buffer_builder(
     }
 }
 
+/// Prepends the unconsumed tail of the previous buffer to each new buffer, then forwards the
+/// stitched result to `ready_tx` for the main-thread `Buffer` to consume.
+///
+/// Protocol (per iteration):
+/// 1. Pre-fetch the next assembled buffer from `buffer_rx` — overlaps with the main thread
+///    consuming the previous buffer.
+/// 2. Wait for the tail signal on `tail_rx`. `Buffer::new` sends `None` as a bootstrap so the
+///    first buffer is delivered with no tail; subsequent signals carry the unconsumed rows.
+/// 3. Prepend the tail (if any), record `tail_size`, and send a `StitchedBuffer` to `ready_tx`.
+pub fn buffer_stitcher(
+    buffer_rx: &Receiver<Result<RecordBatch>>,
+    tail_rx: &Receiver<Option<RecordBatch>>,
+    ready_tx: &Sender<Result<StitchedBuffer>>,
+    schema: &SchemaRef,
+) {
+    loop {
+        // Pre-fetch eagerly — by the time the main thread exhausts the current buffer and sends
+        // the tail, the next buffer is likely already sitting in `next`.
+        let next = match buffer_rx.recv() {
+            Ok(Ok(next)) => next,
+            Ok(Err(e)) => {
+                let _ = ready_tx.send(Err(e));
+                return; // upstream error
+            }
+            Err(_) => return, // channel closed
+        };
+        // Wait for the tail from Buffer (None on the first call — bootstrap sent by Buffer::new).
+        let tail = match tail_rx.recv() {
+            Ok(tail) => tail,
+            Err(_) => return, // consumer dropped
+        };
+        let tail_size = tail.as_ref().map_or(0, RecordBatch::num_rows);
+        let data = match tail {
+            Some(tail) => match concat_batches(schema, [&tail, &next]) {
+                Ok(data) => data,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e.into()));
+                    return;
+                }
+            },
+            None => next,
+        };
+        if ready_tx.send(Ok(StitchedBuffer { data, tail_size })).is_err() {
+            return; // consumer dropped
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation)]
 #[allow(clippy::cast_possible_wrap)]
@@ -232,32 +299,36 @@ mod tests {
     use std::thread;
 
     use arrow::array::{Int32Array, RecordBatch};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use crossbeam_channel::{bounded, Receiver};
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use crossbeam_channel::bounded;
 
-    use super::reorder_batch;
-    use crate::error::{Error, Result};
+    use super::{buffer_builder, buffer_stitcher, reorder_batch};
+    use crate::dataloader::ShuffleConfig;
+    use crate::error::Error;
 
-    /// Build a one-row batch whose single `val` column contains `value`.
-    /// Each test stores the dispatch id as the column value so arrival order is verifiable.
+    fn schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("val", DataType::Int32, false)]))
+    }
+
     fn make_batch(value: i32) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Int32, false)]));
-        RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![value]))]).unwrap()
+        make_rows(&[value])
     }
 
-    fn collect_values(ordered_rx: Receiver<Result<RecordBatch>>) -> Vec<i32> {
-        ordered_rx
-            .into_iter()
-            .map(|r| {
-                r.unwrap()
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .unwrap()
-                    .value(0)
-            })
-            .collect()
+    fn make_rows(values: &[i32]) -> RecordBatch {
+        RecordBatch::try_new(schema(), vec![Arc::new(Int32Array::from(values.to_vec()))]).unwrap()
     }
+
+    fn batch_values(batch: &RecordBatch) -> Vec<i32> {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .values()
+            .to_vec()
+    }
+
+    // ── reorder_batch ────────────────────────────────────────────────────────
 
     #[test]
     fn test_reorder_restores_dispatch_order() {
@@ -272,10 +343,11 @@ mod tests {
 
         thread::spawn(move || reorder_batch(&batch_rx, &ordered_tx, 8));
 
-        assert_eq!(
-            collect_values(ordered_rx),
-            (0..n as i32).collect::<Vec<_>>()
-        );
+        let values: Vec<i32> = ordered_rx
+            .into_iter()
+            .map(|r| batch_values(&r.unwrap())[0])
+            .collect();
+        assert_eq!(values, (0..n as i32).collect::<Vec<_>>());
     }
 
     #[test]
@@ -290,7 +362,11 @@ mod tests {
 
         thread::spawn(move || reorder_batch(&batch_rx, &ordered_tx, 8));
 
-        assert_eq!(collect_values(ordered_rx), vec![0, 1, 2, 3]);
+        let values: Vec<i32> = ordered_rx
+            .into_iter()
+            .map(|r| batch_values(&r.unwrap())[0])
+            .collect();
+        assert_eq!(values, vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -304,5 +380,77 @@ mod tests {
         thread::spawn(move || reorder_batch(&batch_rx, &ordered_tx, 8));
 
         assert!(ordered_rx.recv().unwrap().is_err());
+    }
+
+    // ── buffer_builder ───────────────────────────────────────────────────────
+
+    // Verifies that different seed_offsets produce different permutations — the mechanism
+    // Python shuffle tests can't inspect directly since they only observe batch values.
+    #[test]
+    fn test_buffer_builder_shuffle_advances_seed_per_buffer() {
+        let rows: Vec<i32> = (0..100).collect();
+        let shuffle_cfg = ShuffleConfig { shuffle: true, seed: 42 };
+        let schema = schema();
+
+        let run_with_offset = |offset: usize| {
+            let (ordered_tx, ordered_rx) = bounded(128);
+            let (buffer_tx, buffer_rx) = bounded(4);
+            let schema = schema.clone();
+            ordered_tx.send(Ok(make_rows(&rows))).unwrap();
+            drop(ordered_tx);
+            thread::spawn(move || buffer_builder(&ordered_rx, &buffer_tx, &schema, 100, shuffle_cfg, offset));
+            batch_values(&buffer_rx.recv().unwrap().unwrap())
+        };
+
+        assert_ne!(run_with_offset(0), run_with_offset(1));
+    }
+
+    // ── buffer_stitcher ──────────────────────────────────────────────────────
+
+    // Verifies the tail_size contract and row prepending that checkpoint.rs relies on.
+    // Python tests observe batch values but cannot inspect tail_size directly.
+    #[test]
+    fn test_stitcher_prepends_tail_to_next_buffer() {
+        let (buffer_tx, buffer_rx) = bounded(4);
+        let (tail_tx, tail_rx) = bounded(4);
+        let (ready_tx, ready_rx) = bounded(4);
+        let schema = schema();
+
+        buffer_tx.send(Ok(make_rows(&[1, 2, 3]))).unwrap();
+        buffer_tx.send(Ok(make_rows(&[4, 5, 6]))).unwrap();
+        drop(buffer_tx);
+
+        thread::spawn(move || buffer_stitcher(&buffer_rx, &tail_rx, &ready_tx, &schema));
+
+        // Bootstrap: first buffer has no tail.
+        tail_tx.send(None).unwrap();
+        let s0 = ready_rx.recv().unwrap().unwrap();
+        assert_eq!(s0.tail_size, 0);
+        assert_eq!(batch_values(&s0.data), vec![1, 2, 3]);
+
+        // Simulate Buffer consuming 2 of 3 rows; row [3] remains as the tail.
+        let tail = s0.data.slice(2, 1);
+        tail_tx.send(Some(tail)).unwrap();
+        let s1 = ready_rx.recv().unwrap().unwrap();
+        assert_eq!(s1.tail_size, 1);
+        assert_eq!(batch_values(&s1.data), vec![3, 4, 5, 6]);
+    }
+
+    // Error propagation through the stitcher cannot be triggered from the Python test suite.
+    #[test]
+    fn test_stitcher_propagates_error_from_buffer_rx() {
+        let (buffer_tx, buffer_rx) = bounded(4);
+        let (_tail_tx, tail_rx) = bounded(4);
+        let (ready_tx, ready_rx) = bounded(4);
+        let schema = schema();
+
+        // The stitcher receives from buffer_rx first; it forwards the error and returns
+        // before ever touching tail_rx, so no bootstrap signal is needed here.
+        buffer_tx.send(Err(Error::IterationNotStarted)).unwrap();
+        drop(buffer_tx);
+
+        thread::spawn(move || buffer_stitcher(&buffer_rx, &tail_rx, &ready_tx, &schema));
+
+        assert!(ready_rx.recv().unwrap().is_err());
     }
 }
