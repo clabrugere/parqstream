@@ -47,24 +47,24 @@ impl From<&CheckpointCursor> for StreamCursor {
 
 /// A read task: a contiguous slice of `num_rows` rows at `start_row` within a single row group.
 #[derive(Debug)]
-pub struct Chunk {
+pub struct ReadTask {
     pub id: usize, // monotonic, assigned at dispatch
     pub row_group_idx: usize,
     pub start_row: usize,
     pub num_rows: usize,
 }
 
-/// Emits read tasks to `chunk_tx` indefinitely, cycling through row groups epoch by epoch,
+/// Emits read tasks to `task_tx` indefinitely, cycling through row groups epoch by epoch,
 /// shuffling each epoch's visit order if enabled, and retaining only this rank's strided slice.
-pub fn chunk_dispatcher(
-    chunk_tx: &Sender<Chunk>,
+pub fn task_dispatcher(
+    task_tx: &Sender<ReadTask>,
     row_group_lengths: &[usize],
     chunk_size: usize,
     mut cursor: StreamCursor,
     shuffle_config: ShuffleConfig,
     dist_config: DistributedConfig,
 ) {
-    let mut chunk_id = 0;
+    let mut task_id = 0;
     let num_global = row_group_lengths.len();
     let mut order = dist_config.epoch_order(shuffle_config, cursor.epoch, num_global);
     // rank_groups is invariant across epochs: same dataset and same dist_config always produce the same count.
@@ -79,9 +79,9 @@ pub fn chunk_dispatcher(
         let row_group_length = row_group_lengths[row_group_idx];
         let num_rows = chunk_size.min(row_group_length - cursor.row_in_group);
 
-        if chunk_tx
-            .send(Chunk {
-                id: chunk_id,
+        if task_tx
+            .send(ReadTask {
+                id: task_id,
                 row_group_idx,
                 start_row: cursor.row_in_group,
                 num_rows,
@@ -90,28 +90,28 @@ pub fn chunk_dispatcher(
         {
             return; // consumer dropped
         }
-        chunk_id += 1;
+        task_id += 1;
         cursor.advance(num_rows, row_group_length);
     }
 }
 
-/// Reads each `Chunk` from disk and forwards the resulting `RecordBatch` to `batch_tx`.
+/// Reads chunks defined by a `ReadTask` from disk and forwards the resulting `RecordBatch` to `batch_tx`.
 pub fn chunk_reader(
-    chunk_rx: &Receiver<Chunk>,
+    task_rx: &Receiver<ReadTask>,
     batch_tx: &Sender<Result<(usize, RecordBatch)>>,
     dataset: &Dataset,
 ) {
-    for Chunk {
-        id: chunk_id,
+    for ReadTask {
+        id: task_id,
         row_group_idx,
         start_row,
         num_rows,
-    } in chunk_rx
+    } in task_rx
     {
         let row_group = &dataset.row_group_index[row_group_idx];
         match dataset.read_row_group_range(row_group, start_row, num_rows) {
             Ok(chunk_data) => {
-                if batch_tx.send(Ok((chunk_id, chunk_data))).is_err() {
+                if batch_tx.send(Ok((task_id, chunk_data))).is_err() {
                     return; // consumer dropped
                 }
             }
@@ -152,11 +152,11 @@ pub fn reorder_batch(
     }
 }
 
-/// Accumulates batches from `batch_rx` until `buffer_size` rows are gathered, concatenates them
-/// into one fill, and sends it to `prefetch_tx`.
-pub fn chunk_collector(
-    batch_rx: &Receiver<Result<RecordBatch>>,
-    prefetch_tx: &Sender<Result<RecordBatch>>,
+/// Accumulates batches from `ordered_rx` until `buffer_size` rows are gathered, concatenates them into one fill,
+/// and sends it to `buffer_tx`.
+pub fn buffer_builder(
+    ordered_rx: &Receiver<Result<RecordBatch>>,
+    buffer_tx: &Sender<Result<RecordBatch>>,
     schema: &SchemaRef,
     buffer_size: usize,
 ) {
@@ -164,13 +164,13 @@ pub fn chunk_collector(
         let mut parts: Vec<RecordBatch> = Vec::new();
         let mut rows = 0;
         while rows < buffer_size {
-            match batch_rx.recv() {
+            match ordered_rx.recv() {
                 Ok(Ok(chunk_data)) => {
                     rows += chunk_data.num_rows();
                     parts.push(chunk_data);
                 }
                 Ok(Err(e)) => {
-                    let _ = prefetch_tx.send(Err(e));
+                    let _ = buffer_tx.send(Err(e));
                     return; // upstream error
                 }
                 Err(_) => return, // consumer dropped
@@ -179,11 +179,11 @@ pub fn chunk_collector(
         let buffer = match concat_batches(schema, &parts) {
             Ok(buffer) => buffer,
             Err(e) => {
-                let _ = prefetch_tx.send(Err(e.into()));
+                let _ = buffer_tx.send(Err(e.into()));
                 return; // error concatenating batches
             }
         };
-        if prefetch_tx.send(Ok(buffer)).is_err() {
+        if buffer_tx.send(Ok(buffer)).is_err() {
             return; // consumer dropped
         }
     }

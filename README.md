@@ -231,7 +231,7 @@ Reads Parquet metadata from all files, validates that schemas match, and builds 
 
 ### `DataLoader(dataset, batch_size, ...)`
 
-Iterator that yields batches. Internally spawns a multi-threaded pipeline: a feeder thread emits row-group read tasks, `num_workers` threads read and decode chunks off the GIL, a reorder thread restores dispatch order, a collector thread assembles chunks into buffers, and the main thread slices buffers into batches.
+Iterator that yields batches. Internally spawns a multi-threaded pipeline: a thread emits row-group read tasks, `num_workers` threads read and decode chunks off the GIL, a thread restores dispatch order, a thread assembles chunks into buffers, and the main thread slices buffers into batches.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

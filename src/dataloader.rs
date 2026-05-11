@@ -12,7 +12,7 @@ use crate::dataset::Dataset;
 use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
 use crate::pipeline::{
-    chunk_collector, chunk_dispatcher, chunk_reader, reorder_batch, Chunk, StreamCursor,
+    buffer_builder, chunk_reader, reorder_batch, task_dispatcher, ReadTask, StreamCursor,
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -110,16 +110,14 @@ impl DataLoaderState {
 /// Dataloader with prefetching.
 ///
 /// Calling `__iter__` (or iterating with a for loop) starts:
-/// 1. a thread that emits row-group metadata chunks to a reader channel (`chunk_dispatcher`)
-/// 2. `num_workers` threads that receive metadata from the chunk dispatcher, load them from disk and send them to a data channel (`chunk_reader`)
-/// 3. a thread that reorders completed chunks back into dispatch order using a ring buffer (`reorder_batch`)
-/// 4. a thread that collects ordered chunks until it has > `buffer_size` rows, concatenates them into a fill, and sends it to a fill channel (`chunk_collector`)
-/// 5. the main thread reads fills from the fill channel via a `Buffer`, which optionally shuffles each fill
-///    and slices it into `batch_size` batches; any unconsumed rows from the previous fill are prepended so
-///    batches never straddle a fill boundary with a gap
+/// 1. a thread that emits row-group metadata read tasks to a task channel (`task_dispatcher`)
+/// 2. `num_workers` threads that receive metadata from the task dispatcher, load them from disk and send them to a data channel (`batch_reader`)
+/// 3. a thread that reorders completed tasks back into dispatch order using a ring buffer (`reorder_batch`)
+/// 4. a thread that collects ordered completed tasks until it has > `buffer_size` rows, concatenates them, and sends it to a buffer channel (`buffer_builder`)
+/// 5. the main thread reads a buffer from the buffer channel, optionally shuffled and slices it into `batch_size`
+///    batches; any unconsumed rows from the previous fill are prepended so batches never straddle a fill boundary with a gap
 ///
-/// Up to `prefetch_factor` fills can be buffered in the channel, and the GIL is released while waiting
-/// to allow the background threads to run.
+/// Up to `prefetch_factor` buffers can be prepared, and the GIL is released while waiting to allow the background threads to run.
 ///
 /// The iterator runs for exactly `num_steps` batches, then raises `StopIteration`.
 /// Dropping or garbage-collecting the `DataLoader` signals the background threads to stop early.
@@ -156,26 +154,25 @@ impl DataLoader {
         let buffer_size = self.config.resolve_buffer_size(rank_local_epoch_size);
         let chunk_size = buffer_size.div_ceil(self.config.num_workers);
 
-        // Pre-compute row group layout for feeder
+        // Pre-compute row group layout for task dispatcher so it doesn't have to query the dataset while emitting tasks. The row group index is already in memory, so this is cheap and saves some IPC round-trips.
         let row_group_lengths = dataset
             .row_group_index
             .iter()
             .map(|m| m.num_rows)
             .collect::<Vec<_>>();
 
-        let (chunk_tx, chunk_rx) = bounded::<Chunk>(self.config.num_workers * 2);
+        let (task_tx, task_rx) = bounded::<ReadTask>(self.config.num_workers * 2);
         let (batch_tx, batch_rx) =
             bounded::<Result<(usize, RecordBatch)>>(self.config.num_workers + 2);
         let (ordered_tx, ordered_rx) = bounded::<Result<RecordBatch>>(self.config.num_workers + 2);
-        let (prefetch_tx, prefetch_rx) =
-            bounded::<Result<RecordBatch>>(self.config.prefetch_factor);
+        let (buffer_tx, prefetch_rx) = bounded::<Result<RecordBatch>>(self.config.prefetch_factor);
 
-        // chunk feeder sending row group read tasks to workers
+        // prepare and sends read tasks to workers
         let cursor = StreamCursor::from(cursor);
         let dist_config = self.dist_config;
         thread::spawn(move || {
-            chunk_dispatcher(
-                &chunk_tx,
+            task_dispatcher(
+                &task_tx,
                 &row_group_lengths,
                 chunk_size,
                 cursor,
@@ -186,21 +183,21 @@ impl DataLoader {
 
         // workers read a contiguous chunk from a row group
         for _ in 0..self.config.num_workers {
-            let chunk_rx = chunk_rx.clone();
-            let data_tx = batch_tx.clone();
+            let task_rx = task_rx.clone();
+            let buffer_tx = batch_tx.clone();
             let dataset = dataset.clone();
-            thread::spawn(move || chunk_reader(&chunk_rx, &data_tx, &dataset));
+            thread::spawn(move || chunk_reader(&task_rx, &buffer_tx, &dataset));
         }
         drop(batch_tx); // original instance wasn't moved, so drop it to avoid a leak
 
         // reorder out-of-order batches by dispatch id before they reach the collector
-        // capacity matches the total in-flight budget (chunk_tx + workers + batch_tx) so no slot is ever reused
+        // capacity matches the total in-flight budget (task_tx + workers + batch_tx) so no slot is ever reused
         let capacity = 4 * self.config.num_workers + 2;
         thread::spawn(move || reorder_batch(&batch_rx, &ordered_tx, capacity));
 
         // collect chunks until > buffer_size rows, then concatenate and send to batch buffer
         let schema = dataset.projected_schema.clone();
-        thread::spawn(move || chunk_collector(&ordered_rx, &prefetch_tx, &schema, buffer_size));
+        thread::spawn(move || buffer_builder(&ordered_rx, &buffer_tx, &schema, buffer_size));
 
         prefetch_rx
     }
