@@ -3,8 +3,8 @@
 /// Items are placed by their monotonic `id` into slot `id % capacity`. `drain` yields
 /// consecutive items starting at the lowest unseen id, stopping as soon as a gap is found.
 ///
-/// The caller must guarantee that no two live ids share the same slot, i.e. ids `X` and
-/// `X + capacity` are never both in the buffer simultaneously.
+/// The caller must guarantee that no two live ids share the same slot, i.e. ids `i` and
+/// `i + capacity` are never both in the buffer simultaneously.
 pub struct RingBuffer<T> {
     capacity: usize,
     slots: Vec<Option<T>>,

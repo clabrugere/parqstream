@@ -43,18 +43,18 @@ fn locate_row_in_order(
     (row_group_pos, row_in_group)
 }
 
-/// Position within the infinite row-group stream, used to resume a `DataLoader`.
+/// Position within the infinite row-group stream, used to resume a [`DataLoader`].
 ///
 /// `epoch` + `row_group_pos` locate the feeder's starting row group.
 /// `refill_count` and `buffer_offset` locate the starting position within the Buffer.
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointCursor {
-    pub stream_epoch: usize, // feeder's pass count, used to seed the shuffle
+    pub stream_epoch: usize,  // feeder's pass count, used to seed the shuffle
     pub row_group_pos: usize, // position within the rank-local epoch order
     pub row_in_group: usize,
     pub refill_count: usize,
     pub buffer_offset: usize,
-    pub rows_epoch_start: usize, // cumulative baseline; see DataLoaderState::rows_epoch_start
+    pub rows_epoch_start: usize, // cumulative baseline; see [`DataLoaderState::rows_epoch_start`]
 }
 
 impl CheckpointCursor {
@@ -66,7 +66,7 @@ impl CheckpointCursor {
         row_group_index: &[RowGroupMeta],
         buffer_snapshot: &BufferSnapshot,
     ) -> Self {
-        // rows_epoch_start accumulates the absolute epoch-row baseline across resume levels
+        // Rows_epoch_start accumulates the absolute epoch-row baseline across resume levels
         // so that rows_at_buffer_start stays correct even after chained resumes.
         let rows_epoch_start = state.rows_epoch_start + state.rows_yielded;
         let rows_at_buffer_start = rows_epoch_start - buffer_snapshot.offset;
@@ -86,7 +86,7 @@ impl CheckpointCursor {
         };
 
         // The snapshot captures seed_offset after the last increment; subtract 1 so
-        // Buffer::new starts with the value it had before that refill fired.
+        // [`Buffer::new`] starts with the value it had before that refill fired.
         let refill_count = buffer_snapshot.seed_offset.saturating_sub(1);
 
         // Locate the feeder's epoch and position within it. For world_size=1, locate_epoch
@@ -148,7 +148,7 @@ impl<'py> IntoPyObject<'py> for &CheckpointCursor {
     }
 }
 
-/// Serializable snapshot of a `DataLoader` mid-run, sufficient to resume from the exact same position.
+/// Serializable snapshot of a [`DataLoader`] mid-run, sufficient to resume from the exact same position.
 #[pyclass(from_py_object)]
 #[derive(Debug, Clone)]
 pub struct Checkpoint {
@@ -179,7 +179,7 @@ impl<'py> IntoPyObject<'py> for &Checkpoint {
 }
 
 impl Checkpoint {
-    /// Builds a `Checkpoint` from the current `DataLoader` state.
+    /// Builds a [`Checkpoint`] from the current [`DataLoader`] state.
     pub fn from_state(
         state: &DataLoaderState,
         shuffle_config: ShuffleConfig,

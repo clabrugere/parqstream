@@ -27,7 +27,7 @@ class DataLoader:
     """Prefetching dataloader that yields batches as `dict[str, np.ndarray]`.
 
     Backed by Rust workers that read and assemble Arrow batches off the GIL.
-    Columns are transferred via the Arrow PyCapsule Interface — zero-copy for
+    Columns are transferred via the Arrow PyCapsule Interface: zero-copy for
     dense numeric columns, one copy for nullable or string columns.
 
     Args:

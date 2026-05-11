@@ -19,12 +19,12 @@
 
 parqstream streams batches directly from Parquet files without loading the full dataset into memory. It is built in Rust with Python bindings, and designed to keep your GPU saturated while consuming constant memory regardless of dataset size.
 
-- **Zero-copy transfer** — dense numeric columns are transferred to Python via the Arrow PyCapsule Interface with no data copy
-- **Multi-threaded prefetching** — worker threads read and decode chunks off the GIL while the main thread consumes the current buffer
-- **Approximate uniform shuffling** — combined row-group ordering and buffer shuffling without loading the full dataset
-- **Exact checkpointing** — capture and restore the iteration position to the row, including across restarts
-- **Distributed training** — partition the dataset across processes with `rank` / `world_size`; each rank gets a disjoint subset per epoch, with shuffle and checkpointing fully supported
-- **Framework-agnostic** — yields `dict[str, np.ndarray]` by default; pass a `collate_fn` for PyTorch tensors or any other format
+- **Zero-copy transfer**: dense numeric columns are transferred to Python via the Arrow PyCapsule Interface with no data copy
+- **Multi-threaded prefetching**: worker threads read and decode chunks off the GIL while the main thread consumes the current buffer
+- **Approximate uniform shuffling**: combined row-group ordering and buffer shuffling without loading the full dataset
+- **Exact checkpointing**: capture and restore the iteration position to the row, including across restarts
+- **Distributed training**: partition the dataset across processes with `rank` / `world_size`; each rank gets a disjoint subset per epoch, with shuffle and checkpointing fully supported
+- **Framework-agnostic**: yields `dict[str, np.ndarray]` by default; pass a `collate_fn` for PyTorch tensors or any other format
 
 ---
 
@@ -83,7 +83,7 @@ for batch in loader:
 
 ### Shuffled, indefinite cycling
 
-Pass `num_steps=None` (the default) to cycle the dataset indefinitely — useful for training loops that count steps rather than epochs. Set `shuffle=True` for approximate uniform random sampling: row groups are visited in a random order each epoch, and each buffer is shuffled before being sliced into batches.
+Pass `num_steps=None` (the default) to cycle the dataset indefinitely. Useful for training loops that count steps rather than epochs. Set `shuffle=True` for approximate uniform random sampling: row groups are visited in a random order each epoch, and each buffer is shuffled before being sliced into batches.
 
 ```python
 loader = DataLoader(
@@ -152,7 +152,7 @@ for batch in loader:
 
 The dataset is partitioned at the row-group level using a strided assignment: rank `r` takes positions `r, r+W, r+2W, …` from the epoch's visit order. This handles uneven splits (`num_row_groups % world_size ≠ 0`) without dropping data. `world_size` must not exceed the number of row groups so that every rank receives at least one.
 
-Checkpointing works per-rank — save and restore each rank's loader independently, using the same `rank` and `world_size`:
+Checkpointing works per-rank. Save and restore each rank's loader independently, using the same `rank` and `world_size`:
 
 ```python
 # save
@@ -231,16 +231,16 @@ Reads Parquet metadata from all files, validates that schemas match, and builds 
 
 ### `DataLoader(dataset, batch_size, ...)`
 
-Iterator that yields batches. Internally spawns a multi-threaded pipeline: a feeder thread emits row-group read tasks, `num_workers` threads read and decode chunks off the GIL, a reorder thread restores dispatch order, a collector thread assembles chunks into buffers, and the main thread slices buffers into batches.
+Iterator that yields batches. Internally spawns a multi-threaded pipeline: a task dispatcher thread, `num_workers` reader threads (off the GIL), a reorder thread, a buffer assembler thread (also handles shuffling), a buffer stitcher thread (pre-fetches and prepends unconsumed rows), and the main thread which slices stitched buffers into batches with the GIL released.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `dataset` | `Dataset` | — | Source dataset. |
-| `batch_size` | `int` | — | Number of rows per batch. |
+| `dataset` | `Dataset` | / | Source dataset. |
+| `batch_size` | `int` | / | Number of rows per batch. |
 | `num_steps` | `int \| None` | `None` | Total batches to yield. `None` cycles indefinitely. |
 | `shuffle` | `bool` | `False` | Shuffle row-group visit order and each buffer for approximate uniform random sampling. |
 | `num_workers` | `int` | `4` | Number of parallel reader threads. |
-| `prefetch_factor` | `int` | `1` | Buffer channel capacity. Higher values overlap I/O with consumption at the cost of memory. |
+| `prefetch_factor` | `int` | `1` | Number of assembled buffers queued between `buffer_builder` and `buffer_stitcher`. Higher values overlap I/O and assembly with consumption at the cost of memory. |
 | `buffer_size` | `int \| None` | total rows | Rows accumulated before slicing into batches. Controls memory usage and shuffle quality. |
 | `seed` | `int \| None` | `None` | RNG seed for reproducible shuffling and checkpointing. Required to resume from a checkpoint. |
 | `collate_fn` | `callable \| None` | `None` | Function `(Batch) -> any`. When set, its return value is yielded instead of `dict[str, np.ndarray]`. |
@@ -295,19 +295,20 @@ Opaque object returned by `DataLoader.checkpoint()`. Captures training epoch, st
 ```
 Dataset ──► DataLoader
                │
-               ├── chunk_dispatcher  emits row-group tasks (optionally shuffled per epoch)
+               ├── task_dispatcher   emits row-group read tasks (optionally shuffled per epoch)
                │
                ├── worker × N        reads and decodes chunks from disk, off the GIL
                │
                ├── reorder_batch     restores dispatch order via a ring buffer (workers may finish out of order)
                │
-               ├── chunk_collector   assembles ordered chunks into buffers of buffer_size rows
+               ├── buffer_builder    assembles ordered chunks into a buffer of buffer_size rows; shuffles it
+               │                     ↕ prefetch_factor assembled buffers queued ahead
+               ├── buffer_stitcher   pre-fetches the next buffer; prepends unconsumed rows from the previous one
                │
-               └── Buffer            shuffles each buffer, slices into batch_size batches
-                                     ↕ prefetch_factor buffers prepared ahead
+               └── Buffer            slices the stitched buffer into batch_size batches, off the GIL
 ```
 
-Columns are returned to Python via the Arrow PyCapsule Interface — zero-copy for dense numeric types, one copy otherwise.
+Columns are returned to Python via the Arrow PyCapsule Interface: zero-copy for dense numeric types, one copy otherwise.
 
 ---
 
@@ -343,7 +344,7 @@ Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 fl
 | data pipeline overhead | **0.9%** |
 | compute time per step | 2.42 s |
 
-The data pipeline accounts for less than 1% of step time — the GPU stays fully saturated.
+The data pipeline accounts for less than 1% of step time, the GPU stays fully saturated.
 
 To reproduce:
 

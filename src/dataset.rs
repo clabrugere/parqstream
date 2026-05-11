@@ -201,8 +201,7 @@ impl Dataset {
         })
     }
 
-    /// Reads `len` rows from `row_group`, skipping the first `start` rows,
-    /// and returns a projected `RecordBatch`.
+    /// Reads `len` rows from `row_group`, skipping the first `start` rows and returns a projected [`RecordBatch`].
     pub fn read_row_group_range(
         &self,
         row_group: &RowGroupMeta,

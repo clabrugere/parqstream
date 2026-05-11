@@ -9,7 +9,7 @@ use pyo3::types::PyCapsule;
 
 use crate::error::{Error, Result};
 
-/// A slice of rows returned by the `DataLoader`, backed by an Arrow `RecordBatch`.
+/// A slice of rows returned by the [`DataLoader`], backed by an Arrow [`RecordBatch`].
 #[pyclass]
 pub struct Batch {
     data: RecordBatch,
@@ -78,7 +78,7 @@ impl Batch {
 
 #[pymethods]
 impl Column {
-    /// Arrow `PyCapsule` Interface.
+    /// Arrow [`PyCapsule`] Interface.
     /// Returns `(schema_capsule, array_capsule)` per the Arrow specification.
     fn __arrow_c_array__<'py>(
         &self,
