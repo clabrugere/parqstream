@@ -15,7 +15,7 @@ use crate::distributed::DistributedConfig;
 use crate::error::Result;
 use crate::ring_buffer::RingBuffer;
 
-/// Tracks the dispatcher's position within the infinite epoch/row-group stream.
+/// Tracks the position within the infinite epoch/row-group stream.
 #[derive(Debug)]
 pub struct StreamCursor {
     pub epoch: usize,
@@ -50,17 +50,15 @@ impl From<&CheckpointCursor> for StreamCursor {
     }
 }
 
-/// Channels connecting the `buffer_stitcher` thread to the main-thread `Buffer`.
-/// Returned by `spawn_pipeline`; owned by `Buffer`.
+/// Channels connecting the `buffer_stitcher` thread to the main-thread [`Buffer`]. Returned by `spawn_pipeline`.
 #[derive(Debug)]
 pub struct Pipeline {
     pub ready_rx: Receiver<Result<StitchedBuffer>>,
     pub tail_tx: Sender<Option<RecordBatch>>,
 }
 
-/// A buffer delivered by `buffer_stitcher`: the assembled and shuffled `RecordBatch` with the
-/// tail from the previous buffer prepended, plus `tail_size` (number of prepended rows) for
-/// checkpoint accounting.
+/// A buffer delivered by `buffer_stitcher`: the assembled and shuffled `RecordBatch` with the tail from the previous
+///  buffer prepended, plus `tail_size` (number of prepended rows) for checkpoint accounting.
 #[derive(Debug)]
 pub struct StitchedBuffer {
     pub data: RecordBatch,
@@ -117,14 +115,14 @@ pub fn task_dispatcher(
     }
 }
 
-/// Reads chunks defined by a `ReadTask` from disk and forwards the resulting `RecordBatch` to `batch_tx`.
+/// Reads chunks defined by a [`ReadTask`] from disk and forwards the resulting [`RecordBatch`] to `batch_tx`.
 pub fn chunk_reader(
     task_rx: &Receiver<ReadTask>,
     batch_tx: &Sender<Result<(usize, RecordBatch)>>,
     dataset: &Dataset,
 ) {
     for ReadTask {
-        id: task_id,
+        id,
         row_group_idx,
         start_row,
         num_rows,
@@ -133,7 +131,7 @@ pub fn chunk_reader(
         let row_group = &dataset.row_group_index[row_group_idx];
         match dataset.read_row_group_range(row_group, start_row, num_rows) {
             Ok(chunk_data) => {
-                if batch_tx.send(Ok((task_id, chunk_data))).is_err() {
+                if batch_tx.send(Ok((id, chunk_data))).is_err() {
                     return; // consumer dropped
                 }
             }
@@ -145,7 +143,7 @@ pub fn chunk_reader(
     }
 }
 
-/// Reorders out-of-order batches from `batch_rx` and sends them in order to `ordered_tx` using a ring buffer.
+/// Reorders out-of-order batches from `batch_rx` and sends them in order to `ordered_tx` using a [`RingBuffer`].
 /// Each batch is placed at slot `id % capacity` and consecutive runs are drained after every insert.
 /// `capacity` must be at least as large as the total number of batches that can be in-flight simultaneously
 /// (channels + workers) to avoid collisions.
@@ -191,7 +189,7 @@ fn shuffle_buffer(buffer: &RecordBatch, rng: &mut impl Rng) -> Result<RecordBatc
 }
 
 /// Accumulates ordered batches from `ordered_rx` until `buffer_size` rows are gathered,
-/// concatenates them into one `RecordBatch`, optionally shuffles it with a deterministic seed
+/// concatenates them into one [`RecordBatch`], optionally shuffles it with a deterministic seed
 /// derived from `shuffle_config.seed + seed_offset`, and sends it to `buffer_tx`.
 /// `seed_offset` is incremented after each successful send so every buffer gets a unique seed.
 pub fn buffer_builder(
@@ -235,6 +233,7 @@ pub fn buffer_builder(
                 return; // error concatenating batches
             }
         };
+
         // send to consumer and advance the seed for the next fill; if the consumer has dropped, stop producing
         match buffer_tx.send(buffer) {
             Ok(()) => seed_offset += 1, // only advance the seed if the buffer was successfully sent
@@ -244,14 +243,13 @@ pub fn buffer_builder(
 }
 
 /// Prepends the unconsumed tail of the previous buffer to each new buffer, then forwards the
-/// stitched result to `ready_tx` for the main-thread `Buffer` to consume.
+/// stitched result to `ready_tx` for the main-thread [`Buffer`] to consume.
 ///
 /// Protocol (per iteration):
-/// 1. Pre-fetch the next assembled buffer from `buffer_rx` — overlaps with the main thread
-///    consuming the previous buffer.
-/// 2. Wait for the tail signal on `tail_rx`. `Buffer::new` sends `None` as a bootstrap so the
-///    first buffer is delivered with no tail; subsequent signals carry the unconsumed rows.
-/// 3. Prepend the tail (if any), record `tail_size`, and send a `StitchedBuffer` to `ready_tx`.
+/// 1. Pre-fetch the next assembled buffer from `buffer_rx`. Overlaps with the main thread consuming the previous buffer.
+/// 2. Wait for the tail signal on `tail_rx`. [`Buffer::new`] sends `None` upon creation so the first buffer
+///    is delivered with no tail. Subsequent signals carry the unconsumed rows.
+/// 3. Prepend the tail (if any), record `tail_size`, and send a [`StitchedBuffer`] to `ready_tx`.
 pub fn buffer_stitcher(
     buffer_rx: &Receiver<Result<RecordBatch>>,
     tail_rx: &Receiver<Option<RecordBatch>>,
@@ -259,8 +257,7 @@ pub fn buffer_stitcher(
     schema: &SchemaRef,
 ) {
     loop {
-        // Pre-fetch eagerly — by the time the main thread exhausts the current buffer and sends
-        // the tail, the next buffer is likely already sitting in `next`.
+        // Pre-fetch eagerly. By the time the main thread exhausts the current buffer and sends the tail
         let next = match buffer_rx.recv() {
             Ok(Ok(next)) => next,
             Ok(Err(e)) => {
@@ -269,11 +266,11 @@ pub fn buffer_stitcher(
             }
             Err(_) => return, // channel closed
         };
-        // Wait for the tail from Buffer (None on the first call — bootstrap sent by Buffer::new).
-        let tail = match tail_rx.recv() {
-            Ok(tail) => tail,
-            Err(_) => return, // consumer dropped
+        // Wait for the tail from [`Buffer`] (None on the first call, sent by [`Buffer::new`]).
+        let Ok(tail) = tail_rx.recv() else {
+            return; // consumer dropped
         };
+
         let tail_size = tail.as_ref().map_or(0, RecordBatch::num_rows);
         let data = match tail {
             Some(tail) => match concat_batches(schema, [&tail, &next]) {
@@ -285,7 +282,11 @@ pub fn buffer_stitcher(
             },
             None => next,
         };
-        if ready_tx.send(Ok(StitchedBuffer { data, tail_size })).is_err() {
+
+        if ready_tx
+            .send(Ok(StitchedBuffer { data, tail_size }))
+            .is_err()
+        {
             return; // consumer dropped
         }
     }
@@ -389,7 +390,10 @@ mod tests {
     #[test]
     fn test_buffer_builder_shuffle_advances_seed_per_buffer() {
         let rows: Vec<i32> = (0..100).collect();
-        let shuffle_cfg = ShuffleConfig { shuffle: true, seed: 42 };
+        let shuffle_cfg = ShuffleConfig {
+            shuffle: true,
+            seed: 42,
+        };
         let schema = schema();
 
         let run_with_offset = |offset: usize| {
@@ -398,7 +402,9 @@ mod tests {
             let schema = schema.clone();
             ordered_tx.send(Ok(make_rows(&rows))).unwrap();
             drop(ordered_tx);
-            thread::spawn(move || buffer_builder(&ordered_rx, &buffer_tx, &schema, 100, shuffle_cfg, offset));
+            thread::spawn(move || {
+                buffer_builder(&ordered_rx, &buffer_tx, &schema, 100, shuffle_cfg, offset)
+            });
             batch_values(&buffer_rx.recv().unwrap().unwrap())
         };
 

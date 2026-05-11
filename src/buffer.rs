@@ -13,9 +13,8 @@ pub struct BufferSnapshot {
     pub tail_size: usize,
 }
 
-/// Wraps the `Pipeline` receiver and serves row slices of a requested size.
-/// Unconsumed rows from the previous buffer are stitched to the front of the next by the
-/// `buffer_stitcher` thread; this struct owns the channels used for that handshake.
+/// Wraps the [`Pipeline`] receiver and serves row slices of a requested size.
+/// Unconsumed rows from the previous buffer are stitched to the front of the next by the `buffer_stitcher` thread
 #[derive(Debug)]
 pub struct Buffer {
     pipeline: Pipeline,

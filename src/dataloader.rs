@@ -80,7 +80,7 @@ pub struct ShuffleConfig {
     pub seed: u64,
 }
 
-/// Stores the state of a Dataloader, which can be serialized to a Checkpoint for saving and resuming later
+/// Stores the state of a [`DataLoader`], which can be serialized to a [`Checkpoint`] for saving and resuming later
 #[derive(Debug, Default)]
 pub struct DataLoaderState {
     pub iteration_seed: u64,
@@ -111,20 +111,20 @@ impl DataLoaderState {
 /// Dataloader with prefetching.
 ///
 /// Calling `__iter__` (or iterating with a for loop) starts:
-/// 1. a thread that emits row-group metadata read tasks to a task channel (`task_dispatcher`)
-/// 2. `num_workers` threads that receive tasks, load chunks from disk and send them to a data channel (`chunk_reader`)
-/// 3. a thread that reorders completed chunks back into dispatch order using a ring buffer (`reorder_batch`)
+/// 1. a thread that emits row-group metadata read tasks to a task channel ([`task_dispatcher`])
+/// 2. `num_workers` threads that receive tasks, load chunks from disk and send them to a data channel ([`chunk_reader`])
+/// 3. a thread that reorders completed chunks back into dispatch order using a ring buffer ([`reorder_batch`])
 /// 4. a thread that accumulates ordered chunks until it has >= `buffer_size` rows, concatenates
-///    and optionally shuffles them, and sends the assembled buffer to `buffer_builder`
+///    and optionally shuffles them, and sends the assembled buffer to [`buffer_builder`]
 /// 5. a thread that pre-fetches the next assembled buffer, waits for the unconsumed tail of the
-///    current buffer from the main thread, prepends it, and delivers a `StitchedBuffer` (`buffer_stitcher`)
+///    current buffer from the main thread, prepends it, and delivers a [`StitchedBuffer`] ([`buffer_stitcher`])
 /// 6. the main thread receives stitched buffers and slices them into `batch_size` batches;
 ///    the GIL is released for the entire receive-and-slice operation
 ///
 /// Up to `prefetch_factor` assembled buffers can be queued between stages 4 and 5.
 ///
-/// The iterator runs for exactly `num_steps` batches, then raises `StopIteration`.
-/// Dropping or garbage-collecting the `DataLoader` signals the background threads to stop early.
+/// If set, the iterator runs for exactly `num_steps` batches, then raises `StopIteration`.
+/// Dropping or garbage-collecting the [`DataLoader`] signals the background threads to stop early.
 #[pyclass]
 pub struct DataLoader {
     dataset: Arc<Dataset>,
@@ -140,7 +140,7 @@ impl DataLoader {
         self.config.seed + self.state.epoch as u64
     }
 
-    /// Spawn the feeder and worker threads and return the batch receiver
+    /// Spawn the pipeline threads and return [`Pipeline`] with the receiving end of the final channel connected to the buffer stitcher.
     fn spawn_pipeline(&self, shuffle_config: ShuffleConfig, cursor: &CheckpointCursor) -> Pipeline {
         let dataset = self.dataset.clone();
         // Default to the rank-local epoch size so a single buffer fill never spans two epochs.
@@ -154,14 +154,15 @@ impl DataLoader {
         let buffer_size = self.config.resolve_buffer_size(rank_local_epoch_size);
         let chunk_size = buffer_size.div_ceil(self.config.num_workers);
 
-        // Pre-compute row group layout for task dispatcher so it doesn't have to query the dataset while emitting tasks. The row group index is already in memory, so this is cheap and saves some IPC round-trips.
+        // Pre-compute row group layout for task dispatcher so it doesn't have to query the dataset while emitting tasks.
+        // The row group index is already in memory, so this is cheap.
         let row_group_lengths = dataset
             .row_group_index
             .iter()
             .map(|m| m.num_rows)
             .collect::<Vec<_>>();
 
-        // declare all the channels
+        // Declare all the channels
         let (task_tx, task_rx) = bounded::<ReadTask>(self.config.num_workers * 2);
         let (batch_tx, batch_rx) =
             bounded::<Result<(usize, RecordBatch)>>(self.config.num_workers + 2);
@@ -170,7 +171,7 @@ impl DataLoader {
         let (tail_tx, tail_rx) = bounded::<Option<RecordBatch>>(1);
         let (ready_tx, ready_rx) = bounded::<Result<StitchedBuffer>>(1);
 
-        // prepare and sends read tasks to workers
+        // Prepare and sends read tasks to workers
         let dist_config = self.dist_config;
         let stream_cursor = StreamCursor::from(cursor);
         thread::spawn(move || {
@@ -184,7 +185,7 @@ impl DataLoader {
             );
         });
 
-        // workers read a contiguous chunk from a row group
+        // Workers read a contiguous chunk from a row group
         for _ in 0..self.config.num_workers {
             let task_rx = task_rx.clone();
             let batch_tx = batch_tx.clone();
@@ -193,12 +194,12 @@ impl DataLoader {
         }
         drop(batch_tx); // original instance wasn't moved, so drop it to avoid a leak
 
-        // reorder out-of-order batches by dispatch id before they reach the collector
-        // capacity matches the total in-flight budget (task_tx + workers + batch_tx) so no slot is ever reused
+        // Reorder out-of-order batches by dispatch id before they reach the buffer builder.
+        // Capacity matches the total in-flight budget (task_tx + workers + batch_tx) so no slot is ever reused.
         let capacity = 4 * self.config.num_workers + 2;
         thread::spawn(move || reorder_batch(&batch_rx, &ordered_tx, capacity));
 
-        // collect chunks until > buffer_size rows, then concatenate and send to batch buffer
+        // Collect chunks until > buffer_size rows, then concatenate and send to the buffer builder.
         let schema = dataset.projected_schema.clone();
         let seed_offset = cursor.refill_count;
         thread::spawn(move || {
@@ -212,7 +213,7 @@ impl DataLoader {
             );
         });
 
-        // stitch the tail of the previous buffer to the front of the next one, and signal when a stitched buffer is ready for consumption
+        // Stitch the tail of the previous buffer to the front of the next one, and signal when a stitched buffer is ready for consumption
         let schema = dataset.projected_schema.clone();
         thread::spawn(move || buffer_stitcher(&buffer_rx, &tail_rx, &ready_tx, &schema));
 
@@ -304,7 +305,7 @@ impl DataLoader {
         slf
     }
 
-    /// Return the next `Batch`, or raise `StopIteration` when the pipeline is exhausted.
+    /// Return the next [`Batch`], or raise `StopIteration` when the pipeline is exhausted.
     pub fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> Result<Batch> {
         let batch_size = slf.config.batch_size;
         let state = &mut slf.state;
