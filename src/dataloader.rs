@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread;
 
 use arrow::record_batch::RecordBatch;
-use crossbeam_channel::bounded;
+use crossbeam_channel::{bounded, Receiver};
 use pyo3::prelude::*;
 
 use crate::batch::Batch;
@@ -12,8 +12,7 @@ use crate::dataset::Dataset;
 use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
 use crate::pipeline::{
-    buffer_builder, buffer_stitcher, chunk_reader, reorder_batch, task_dispatcher, Pipeline,
-    ReadTask, StitchedBuffer, StreamCursor,
+    buffer_builder, chunk_reader, reorder_batch, task_dispatcher, ReadTask, StreamCursor,
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -115,11 +114,9 @@ impl DataLoaderState {
 /// 2. `num_workers` threads that receive tasks, load chunks from disk and send them to a data channel ([`chunk_reader`])
 /// 3. a thread that reorders completed chunks back into dispatch order using a ring buffer ([`reorder_batch`])
 /// 4. a thread that accumulates ordered chunks until it has >= `buffer_size` rows, concatenates
-///    and optionally shuffles them, and sends the assembled buffer to [`buffer_builder`]
-/// 5. a thread that pre-fetches the next assembled buffer, waits for the unconsumed tail of the
-///    current buffer from the main thread, prepends it, and delivers a [`StitchedBuffer`] ([`buffer_stitcher`])
-/// 6. the main thread receives stitched buffers and slices them into `batch_size` batches;
-///    the GIL is released for the entire receive-and-slice operation
+///    and optionally shuffles them, and sends the assembled buffer ([`buffer_builder`])
+/// 5. the main thread receives assembled buffers, stitches any unconsumed tail rows to the front,
+///    and slices into `batch_size` batches; the GIL is released for the entire operation
 ///
 /// Up to `prefetch_factor` assembled buffers can be queued between stages 4 and 5.
 ///
@@ -140,8 +137,12 @@ impl DataLoader {
         self.config.seed + self.state.epoch as u64
     }
 
-    /// Spawn the pipeline threads and return [`Pipeline`] with the receiving end of the final channel connected to the buffer stitcher.
-    fn spawn_pipeline(&self, shuffle_config: ShuffleConfig, cursor: &CheckpointCursor) -> Pipeline {
+    /// Spawn the pipeline threads and return the receiving end of the assembled-buffer channel.
+    fn spawn_pipeline(
+        &self,
+        shuffle_config: ShuffleConfig,
+        cursor: &CheckpointCursor,
+    ) -> Receiver<Result<RecordBatch>> {
         let dataset = self.dataset.clone();
         // Default to the rank-local epoch size so a single buffer fill never spans two epochs.
         // For world_size=1 this equals dataset.total_rows (same as before).
@@ -168,8 +169,6 @@ impl DataLoader {
             bounded::<Result<(usize, RecordBatch)>>(self.config.num_workers + 2);
         let (ordered_tx, ordered_rx) = bounded::<Result<RecordBatch>>(self.config.num_workers + 2);
         let (buffer_tx, buffer_rx) = bounded::<Result<RecordBatch>>(self.config.prefetch_factor);
-        let (tail_tx, tail_rx) = bounded::<Option<RecordBatch>>(1);
-        let (ready_tx, ready_rx) = bounded::<Result<StitchedBuffer>>(1);
 
         // Prepare and sends read tasks to workers
         let dist_config = self.dist_config;
@@ -213,11 +212,7 @@ impl DataLoader {
             );
         });
 
-        // Stitch the tail of the previous buffer to the front of the next one, and signal when a stitched buffer is ready for consumption
-        let schema = dataset.projected_schema.clone();
-        thread::spawn(move || buffer_stitcher(&buffer_rx, &tail_rx, &ready_tx, &schema));
-
-        Pipeline { ready_rx, tail_tx }
+        buffer_rx
     }
 }
 
@@ -296,8 +291,8 @@ impl DataLoader {
             shuffle: slf.config.shuffle,
             seed,
         };
-        let pipeline = slf.spawn_pipeline(shuffle_config, &cursor);
-        let buffer = Buffer::new(pipeline, cursor.refill_count, cursor.buffer_offset);
+        let buffer_rx = slf.spawn_pipeline(shuffle_config, &cursor);
+        let buffer = Buffer::new(buffer_rx, cursor.refill_count, cursor.buffer_offset);
 
         slf.state
             .new_iteration(seed, buffer, steps_remaining, cursor.rows_epoch_start);

@@ -1,7 +1,8 @@
+use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
+use crossbeam_channel::Receiver;
 
 use crate::error::Result;
-use crate::pipeline::{Pipeline, StitchedBuffer};
 
 /// Point-in-time view of a [`Buffer`], used by checkpoint to reconstruct the resume position.
 #[derive(Debug, Default)]
@@ -14,10 +15,10 @@ pub struct BufferSnapshot {
 }
 
 /// Wraps the [`Pipeline`] receiver and serves row slices of a requested size.
-/// Unconsumed rows from the previous buffer are stitched to the front of the next by the `buffer_stitcher` thread
+/// Unconsumed rows from the previous buffer are stitched to the front of the next buffer.
 #[derive(Debug)]
 pub struct Buffer {
-    pipeline: Pipeline,
+    rx: Receiver<Result<RecordBatch>>,
     data: Option<RecordBatch>,
     offset: usize,
     /// Incremented after each refill; the nth buffer is shuffled with `SmallRng(seed + seed_offset_at_that_refill)`.
@@ -29,10 +30,13 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    pub fn new(pipeline: Pipeline, seed_offset: usize, resume_offset: usize) -> Self {
-        let _ = pipeline.tail_tx.send(None); // ensure the tail channel is initialized for the first refill
+    pub fn new(
+        rx: Receiver<Result<RecordBatch>>,
+        seed_offset: usize,
+        resume_offset: usize,
+    ) -> Self {
         Self {
-            pipeline,
+            rx,
             data: None,
             offset: 0,
             seed_offset,
@@ -47,27 +51,29 @@ impl Buffer {
             .is_none_or(|batch| self.offset + num_rows > batch.num_rows())
     }
 
-    /// Fetches the next stitched buffer from the pipeline, blocking until it is ready.
+    /// Refill the buffer by receiving the next batch from the channel and concatenating any unconsumed rows from the previous batch.
+    /// Returns `Ok(false)` if the channel is closed.
     fn refill(&mut self) -> Result<bool> {
-        // Send the current tail BEFORE blocking on ready_rx: the stitcher already has the next
-        // buffer pre-fetched and only needs the tail to complete the stitch.
-        if let Some(data) = &self.data {
-            let tail = (self.offset < data.num_rows())
-                .then(|| data.slice(self.offset, data.num_rows() - self.offset));
-            let _ = self.pipeline.tail_tx.send(tail);
-        }
+        let tail = self.data.as_ref().and_then(|data| {
+            (self.offset < data.num_rows())
+                .then(|| data.slice(self.offset, data.num_rows() - self.offset))
+        });
+        let tail_size = tail.as_ref().map_or(0, RecordBatch::num_rows);
 
-        match self.pipeline.ready_rx.recv() {
-            Ok(Ok(StitchedBuffer { data, tail_size })) => {
+        match self.rx.recv() {
+            Ok(Ok(next)) => {
+                self.data = Some(match tail {
+                    Some(tail) => concat_batches(&next.schema(), [&tail, &next])?,
+                    None => next,
+                });
                 self.tail_size = tail_size;
-                self.data = Some(data);
                 self.offset = self.resume_offset;
                 self.resume_offset = 0;
                 self.seed_offset += 1;
                 Ok(true)
             }
             Ok(Err(e)) => Err(e),
-            Err(_) => Ok(false), // channel closed = exhausted
+            Err(_) => Ok(false),
         }
     }
 

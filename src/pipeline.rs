@@ -50,21 +50,6 @@ impl From<&CheckpointCursor> for StreamCursor {
     }
 }
 
-/// Channels connecting the `buffer_stitcher` thread to the main-thread [`Buffer`]. Returned by `spawn_pipeline`.
-#[derive(Debug)]
-pub struct Pipeline {
-    pub ready_rx: Receiver<Result<StitchedBuffer>>,
-    pub tail_tx: Sender<Option<RecordBatch>>,
-}
-
-/// A buffer delivered by `buffer_stitcher`: the assembled and shuffled `RecordBatch` with the tail from the previous
-///  buffer prepended, plus `tail_size` (number of prepended rows) for checkpoint accounting.
-#[derive(Debug)]
-pub struct StitchedBuffer {
-    pub data: RecordBatch,
-    pub tail_size: usize,
-}
-
 /// A read task: a contiguous slice of `num_rows` rows at `start_row` within a single row group.
 #[derive(Debug)]
 pub struct ReadTask {
@@ -242,56 +227,6 @@ pub fn buffer_builder(
     }
 }
 
-/// Prepends the unconsumed tail of the previous buffer to each new buffer, then forwards the
-/// stitched result to `ready_tx` for the main-thread [`Buffer`] to consume.
-///
-/// Protocol (per iteration):
-/// 1. Pre-fetch the next assembled buffer from `buffer_rx`. Overlaps with the main thread consuming the previous buffer.
-/// 2. Wait for the tail signal on `tail_rx`. [`Buffer::new`] sends `None` upon creation so the first buffer
-///    is delivered with no tail. Subsequent signals carry the unconsumed rows.
-/// 3. Prepend the tail (if any), record `tail_size`, and send a [`StitchedBuffer`] to `ready_tx`.
-pub fn buffer_stitcher(
-    buffer_rx: &Receiver<Result<RecordBatch>>,
-    tail_rx: &Receiver<Option<RecordBatch>>,
-    ready_tx: &Sender<Result<StitchedBuffer>>,
-    schema: &SchemaRef,
-) {
-    loop {
-        // Pre-fetch eagerly. By the time the main thread exhausts the current buffer and sends the tail
-        let next = match buffer_rx.recv() {
-            Ok(Ok(next)) => next,
-            Ok(Err(e)) => {
-                let _ = ready_tx.send(Err(e));
-                return; // upstream error
-            }
-            Err(_) => return, // channel closed
-        };
-        // Wait for the tail from [`Buffer`] (None on the first call, sent by [`Buffer::new`]).
-        let Ok(tail) = tail_rx.recv() else {
-            return; // consumer dropped
-        };
-
-        let tail_size = tail.as_ref().map_or(0, RecordBatch::num_rows);
-        let data = match tail {
-            Some(tail) => match concat_batches(schema, [&tail, &next]) {
-                Ok(data) => data,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e.into()));
-                    return;
-                }
-            },
-            None => next,
-        };
-
-        if ready_tx
-            .send(Ok(StitchedBuffer { data, tail_size }))
-            .is_err()
-        {
-            return; // consumer dropped
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation)]
 #[allow(clippy::cast_possible_wrap)]
@@ -303,7 +238,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use crossbeam_channel::bounded;
 
-    use super::{buffer_builder, buffer_stitcher, reorder_batch};
+    use super::{buffer_builder, reorder_batch};
     use crate::dataloader::ShuffleConfig;
     use crate::error::Error;
 
@@ -409,54 +344,5 @@ mod tests {
         };
 
         assert_ne!(run_with_offset(0), run_with_offset(1));
-    }
-
-    // ── buffer_stitcher ──────────────────────────────────────────────────────
-
-    // Verifies the tail_size contract and row prepending that checkpoint.rs relies on.
-    // Python tests observe batch values but cannot inspect tail_size directly.
-    #[test]
-    fn test_stitcher_prepends_tail_to_next_buffer() {
-        let (buffer_tx, buffer_rx) = bounded(4);
-        let (tail_tx, tail_rx) = bounded(4);
-        let (ready_tx, ready_rx) = bounded(4);
-        let schema = schema();
-
-        buffer_tx.send(Ok(make_rows(&[1, 2, 3]))).unwrap();
-        buffer_tx.send(Ok(make_rows(&[4, 5, 6]))).unwrap();
-        drop(buffer_tx);
-
-        thread::spawn(move || buffer_stitcher(&buffer_rx, &tail_rx, &ready_tx, &schema));
-
-        // Bootstrap: first buffer has no tail.
-        tail_tx.send(None).unwrap();
-        let s0 = ready_rx.recv().unwrap().unwrap();
-        assert_eq!(s0.tail_size, 0);
-        assert_eq!(batch_values(&s0.data), vec![1, 2, 3]);
-
-        // Simulate Buffer consuming 2 of 3 rows; row [3] remains as the tail.
-        let tail = s0.data.slice(2, 1);
-        tail_tx.send(Some(tail)).unwrap();
-        let s1 = ready_rx.recv().unwrap().unwrap();
-        assert_eq!(s1.tail_size, 1);
-        assert_eq!(batch_values(&s1.data), vec![3, 4, 5, 6]);
-    }
-
-    // Error propagation through the stitcher cannot be triggered from the Python test suite.
-    #[test]
-    fn test_stitcher_propagates_error_from_buffer_rx() {
-        let (buffer_tx, buffer_rx) = bounded(4);
-        let (_tail_tx, tail_rx) = bounded(4);
-        let (ready_tx, ready_rx) = bounded(4);
-        let schema = schema();
-
-        // The stitcher receives from buffer_rx first; it forwards the error and returns
-        // before ever touching tail_rx, so no bootstrap signal is needed here.
-        buffer_tx.send(Err(Error::IterationNotStarted)).unwrap();
-        drop(buffer_tx);
-
-        thread::spawn(move || buffer_stitcher(&buffer_rx, &tail_rx, &ready_tx, &schema));
-
-        assert!(ready_rx.recv().unwrap().is_err());
     }
 }
