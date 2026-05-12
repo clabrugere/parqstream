@@ -314,23 +314,27 @@ Columns are returned to Python via the Arrow PyCapsule Interface: zero-copy for 
 
 ## Benchmarks
 
-Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 float32 columns, ~2 GB on disk). Results are slightly optimistic due to OS page cache warmup.
+Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 float32 columns, ~2 GB on disk), `prefetch_factor=1`, `buffer_size=1_000_000`. Results are slightly optimistic due to OS page cache warmup.
 
 **Sequential**
 
 | batch_size | 1 worker | 2 workers | 4 workers | 8 workers |
 |:----------:|:--------:|:---------:|:---------:|:---------:|
-| 1024 | 38.7M rows/s | 46.6M rows/s | 46.7M rows/s | 39.5M rows/s |
-| 2048 | 39.1M rows/s | 58.3M rows/s | 76.5M rows/s | 56.1M rows/s |
-| 4096 | 39.0M rows/s | 60.5M rows/s | **78.7M rows/s** | 61.7M rows/s |
+| 1024  | 36.4M rows/s | 46.4M rows/s | 47.7M rows/s | 36.6M rows/s |
+| 2048  | 38.6M rows/s | 58.5M rows/s | 72.8M rows/s | 54.3M rows/s |
+| 4096  | 39.1M rows/s | 58.8M rows/s | 73.9M rows/s | 59.2M rows/s |
+| 8192  | 38.5M rows/s | 58.5M rows/s | 74.5M rows/s | 58.0M rows/s |
+| 16384 | 38.4M rows/s | 58.9M rows/s | **74.6M rows/s** | 60.3M rows/s |
 
 **Shuffled** (row-group order + buffer shuffle)
 
 | batch_size | 1 worker | 2 workers | 4 workers | 8 workers |
 |:----------:|:--------:|:---------:|:---------:|:---------:|
-| 1024 | 31.5M rows/s | 30.8M rows/s | 29.5M rows/s | 25.6M rows/s |
-| 2048 | 36.5M rows/s | 40.7M rows/s | 39.2M rows/s | 32.2M rows/s |
-| 4096 | 36.8M rows/s | **51.0M rows/s** | 48.3M rows/s | 38.7M rows/s |
+| 1024  | 36.0M rows/s | 48.8M rows/s | 46.7M rows/s | 37.7M rows/s |
+| 2048  | 35.9M rows/s | 51.3M rows/s | 45.0M rows/s | 40.5M rows/s |
+| 4096  | 35.5M rows/s | 54.5M rows/s | **57.0M rows/s** | 41.1M rows/s |
+| 8192  | 33.3M rows/s | 54.4M rows/s | 54.9M rows/s | 44.0M rows/s |
+| 16384 | 35.9M rows/s | 54.5M rows/s | 49.6M rows/s | 41.2M rows/s |
 
 **GPU training** (NVIDIA A10G, 10M rows × 16 shards, 100 float32 features, 10 classes)
 

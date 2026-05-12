@@ -12,8 +12,8 @@ from utils import measure_throughput
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-BATCH_SIZES = [1024, 2048, 4096]
-NUM_WORKERS = [1, 2, 4, 8]
+BATCH_SIZES = [1024, 2048, 4096, 8192, 16384]
+NUM_WORKERS = [w for w in [1, 2, 4, 8] if w <= (os.cpu_count() or 1)]
 
 
 def run(dataset: Dataset, prefetch_factor: int, buffer_size: int) -> dict:
@@ -57,7 +57,7 @@ if __name__ == "__main__":
     parser.add_argument("--data", default="data/", help="Directory with .parquet shards")
     parser.add_argument("--results", default="results/", help="Output directory for JSON")
     parser.add_argument("--prefetch-factor", type=int, default=1, help="Number of buffers to prefetch")
-    parser.add_argument("--buffer-size", type=int, default=100_000, help="Size of the buffer")
+    parser.add_argument("--buffer-size", type=int, default=1_000_000, help="Size of the buffer")
     args = parser.parse_args()
 
     paths = sorted(glob.glob(os.path.join(args.data, "*.parquet")))
