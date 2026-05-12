@@ -231,7 +231,7 @@ Reads Parquet metadata from all files, validates that schemas match, and builds 
 
 ### `DataLoader(dataset, batch_size, ...)`
 
-Iterator that yields batches. Internally spawns a multi-threaded pipeline: a task dispatcher thread, `num_workers` reader threads (off the GIL), a reorder thread, a buffer assembler thread (also handles shuffling), a buffer stitcher thread (pre-fetches and prepends unconsumed rows), and the main thread which slices stitched buffers into batches with the GIL released.
+Iterator that yields batches. Internally spawns a multi-threaded pipeline: a task dispatcher thread, `num_workers` reader threads (off the GIL), a reorder thread, and a buffer assembler thread (concatenates chunks and shuffles). The main thread receives assembled buffers, stitches any unconsumed tail rows to the front, and slices into batches with the GIL released.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -240,7 +240,7 @@ Iterator that yields batches. Internally spawns a multi-threaded pipeline: a tas
 | `num_steps` | `int \| None` | `None` | Total batches to yield. `None` cycles indefinitely. |
 | `shuffle` | `bool` | `False` | Shuffle row-group visit order and each buffer for approximate uniform random sampling. |
 | `num_workers` | `int` | `4` | Number of parallel reader threads. |
-| `prefetch_factor` | `int` | `1` | Number of assembled buffers queued between `buffer_builder` and `buffer_stitcher`. Higher values overlap I/O and assembly with consumption at the cost of memory. |
+| `prefetch_factor` | `int` | `1` | Number of assembled buffers queued ahead of consumption. Higher values overlap I/O and assembly with the main thread at the cost of memory. |
 | `buffer_size` | `int \| None` | total rows | Rows accumulated before slicing into batches. Controls memory usage and shuffle quality. |
 | `seed` | `int \| None` | `None` | RNG seed for reproducible shuffling and checkpointing. Required to resume from a checkpoint. |
 | `collate_fn` | `callable \| None` | `None` | Function `(Batch) -> any`. When set, its return value is yielded instead of `dict[str, np.ndarray]`. |
@@ -303,9 +303,7 @@ Dataset ──► DataLoader
                │
                ├── buffer_builder    assembles ordered chunks into a buffer of buffer_size rows; shuffles it
                │                     ↕ prefetch_factor assembled buffers queued ahead
-               ├── buffer_stitcher   pre-fetches the next buffer; prepends unconsumed rows from the previous one
-               │
-               └── Buffer            slices the stitched buffer into batch_size batches, off the GIL
+               └── Buffer            stitches unconsumed tail rows to the front, slices into batch_size batches, off the GIL
 ```
 
 Columns are returned to Python via the Arrow PyCapsule Interface: zero-copy for dense numeric types, one copy otherwise.
