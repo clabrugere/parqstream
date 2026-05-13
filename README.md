@@ -318,21 +318,21 @@ Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 fl
 
 | batch_size | 1 worker | 2 workers | 4 workers | 8 workers |
 |:----------:|:--------:|:---------:|:---------:|:---------:|
-| 1024  | 36.4M rows/s | 46.4M rows/s | 47.7M rows/s | 36.6M rows/s |
-| 2048  | 38.6M rows/s | 58.5M rows/s | 72.8M rows/s | 54.3M rows/s |
-| 4096  | 39.1M rows/s | 58.8M rows/s | 73.9M rows/s | 59.2M rows/s |
-| 8192  | 38.5M rows/s | 58.5M rows/s | 74.5M rows/s | 58.0M rows/s |
-| 16384 | 38.4M rows/s | 58.9M rows/s | **74.6M rows/s** | 60.3M rows/s |
+| 1024  | 38.9M rows/s | 49.7M rows/s | 48.3M rows/s | 35.8M rows/s |
+| 2048  | 39.4M rows/s | 58.5M rows/s | 75.5M rows/s | 58.6M rows/s |
+| 4096  | 37.9M rows/s | 59.7M rows/s | 77.3M rows/s | 61.6M rows/s |
+| 8192  | 38.9M rows/s | 55.5M rows/s | 68.9M rows/s | 56.9M rows/s |
+| 16384 | 39.0M rows/s | 58.9M rows/s | **78.5M rows/s** | 58.1M rows/s |
 
 **Shuffled** (row-group order + buffer shuffle)
 
 | batch_size | 1 worker | 2 workers | 4 workers | 8 workers |
 |:----------:|:--------:|:---------:|:---------:|:---------:|
-| 1024  | 36.0M rows/s | 48.8M rows/s | 46.7M rows/s | 37.7M rows/s |
-| 2048  | 35.9M rows/s | 51.3M rows/s | 45.0M rows/s | 40.5M rows/s |
-| 4096  | 35.5M rows/s | 54.5M rows/s | **57.0M rows/s** | 41.1M rows/s |
-| 8192  | 33.3M rows/s | 54.4M rows/s | 54.9M rows/s | 44.0M rows/s |
-| 16384 | 35.9M rows/s | 54.5M rows/s | 49.6M rows/s | 41.2M rows/s |
+| 1024  | 35.8M rows/s | 48.7M rows/s | 45.6M rows/s | 37.8M rows/s |
+| 2048  | 34.5M rows/s | 51.5M rows/s | 52.9M rows/s | 43.0M rows/s |
+| 4096  | 36.5M rows/s | 54.5M rows/s | 55.6M rows/s | 43.2M rows/s |
+| 8192  | 36.1M rows/s | 54.2M rows/s | 55.7M rows/s | 44.9M rows/s |
+| 16384 | 35.3M rows/s | 53.2M rows/s | **56.6M rows/s** | 46.5M rows/s |
 
 **GPU training** (NVIDIA A10G, 10M rows × 16 shards, 100 float32 features, 10 classes)
 
