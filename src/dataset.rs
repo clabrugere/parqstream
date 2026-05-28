@@ -69,14 +69,14 @@ fn build_row_group_index(files: &[ParquetFile]) -> Result<(Vec<RowGroupMeta>, us
 
 /// Compute a hash of the dataset definition to use as an identifier, allowing dataloader and checkpoints to verify compatibility.
 fn hash_dataset(
-    paths: impl Iterator<Item = PathBuf>,
+    files: &[ParquetFile],
     columns: &[String],
     num_row_groups: usize,
     num_rows: usize,
 ) -> u64 {
     let mut hasher = AHasher::default();
-    for path in paths {
-        path.hash(&mut hasher);
+    for file in files {
+        file.path.hash(&mut hasher);
     }
     for column in columns {
         column.hash(&mut hasher);
@@ -161,10 +161,10 @@ impl Dataset {
     /// Construct a single logical dataset from `paths`, while validating that all files share the same schema.
     pub fn from_paths(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
         let mut files = Vec::with_capacity(paths.len());
-        let mut paths = paths.into_iter().enumerate();
+        let mut paths = paths.into_iter();
 
         // Read first file metadata to determine schema
-        let (_, first_path) = paths.next().ok_or(Error::EmptyPaths)?;
+        let first_path = paths.next().ok_or(Error::EmptyPaths)?;
         let parquet_file = ParquetFile::load(&first_path)?;
 
         let (projected_schema, projection, columns) = build_projection(&parquet_file, columns)?;
@@ -172,7 +172,7 @@ impl Dataset {
         files.push(parquet_file);
 
         // Process remaining files, validating schema consistency
-        for (_, path) in paths {
+        for path in paths {
             let parquet_file = ParquetFile::load(&path)?;
             if parquet_file.arrow_schema().fields() != projected_schema.fields() {
                 return Err(Error::SchemaMismatch { path: path.into() });
@@ -183,12 +183,7 @@ impl Dataset {
         // Index row groups across all files
         let (row_group_index, total_rows) = build_row_group_index(&files)?;
 
-        let identifier = hash_dataset(
-            files.iter().map(|f| f.path.clone()),
-            &columns,
-            row_group_index.len(),
-            total_rows,
-        );
+        let identifier = hash_dataset(&files, &columns, row_group_index.len(), total_rows);
 
         Ok(Self {
             files,

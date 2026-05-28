@@ -58,7 +58,7 @@ impl DataLoaderConfig {
             batch_size,
             num_steps,
             shuffle,
-            num_workers: num_workers.min(available_cores).max(1),
+            num_workers: num_workers.min(available_cores),
             prefetch_factor,
             buffer_size,
             seed: seed.unwrap_or_else(rand::random),
