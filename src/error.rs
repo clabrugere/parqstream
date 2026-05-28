@@ -38,8 +38,8 @@ pub enum Error {
         source: ParquetError,
     },
 
-    #[error("schema mismatch: {path} has a different schema than the first file")]
-    SchemaMismatch { path: PathBuf },
+    #[error("column type mismatch in {path}: projected fields differ from the first file")]
+    ColumnTypeMismatch { path: PathBuf },
 
     #[error("column '{name}' not found in schema")]
     ColumnNotFound { name: String },
@@ -125,7 +125,7 @@ impl From<Error> for PyErr {
             Error::DataLoaderConsumed => PyStopIteration::new_err(e.to_string()),
             Error::UndefinedLength => PyTypeError::new_err(e.to_string()),
             Error::EmptyPaths
-            | Error::SchemaMismatch { .. }
+            | Error::ColumnTypeMismatch { .. }
             | Error::InvalidBatchSize(_)
             | Error::InvalidNumSteps(_)
             | Error::InvalidNumWorkers(_)

@@ -90,22 +90,6 @@ pub struct DataLoaderState {
     pub rows_epoch_start: usize, // 0 for fresh runs, cursor.rows_epoch_start on resume
 }
 
-impl DataLoaderState {
-    /// Start a new iteration with the given seed, buffer, and `steps_remaining`, and reset `rows_yielded`.
-    pub fn new_iteration(
-        &mut self,
-        seed: u64,
-        buffer: Buffer,
-        steps_remaining: Option<usize>,
-        rows_epoch_start: usize,
-    ) {
-        self.iteration_seed = seed;
-        self.buffer = Some(buffer);
-        self.steps_remaining = steps_remaining;
-        self.rows_yielded = 0;
-        self.rows_epoch_start = rows_epoch_start;
-    }
-}
 
 /// Dataloader with prefetching.
 ///
@@ -146,12 +130,9 @@ impl DataLoader {
         let dataset = self.dataset.clone();
         // Default to the rank-local epoch size so a single buffer fill never spans two epochs.
         // For world_size=1 this equals dataset.total_rows (same as before).
-        let rank_local_epoch_size = self
-            .dist_config
-            .epoch_order(shuffle_config, 0, dataset.row_group_index.len())
-            .iter()
-            .map(|&i| dataset.row_group_index[i].num_rows)
-            .sum();
+        let rank_local_epoch_size =
+            self.dist_config
+                .epoch_row_count(shuffle_config, 0, &dataset.row_group_index);
         let buffer_size = self.config.resolve_buffer_size(rank_local_epoch_size);
         let chunk_size = buffer_size.div_ceil(self.config.num_workers);
 
@@ -294,8 +275,14 @@ impl DataLoader {
         let buffer_rx = slf.spawn_pipeline(shuffle_config, &cursor);
         let buffer = Buffer::new(buffer_rx, cursor.refill_count, cursor.buffer_offset);
 
-        slf.state
-            .new_iteration(seed, buffer, steps_remaining, cursor.rows_epoch_start);
+        slf.state = DataLoaderState {
+            epoch: slf.state.epoch,
+            iteration_seed: seed,
+            buffer: Some(buffer),
+            steps_remaining,
+            rows_yielded: 0,
+            rows_epoch_start: cursor.rows_epoch_start,
+        };
 
         slf
     }

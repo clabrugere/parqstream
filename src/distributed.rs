@@ -57,7 +57,7 @@ impl DistributedConfig {
     }
 
     /// Total rows this rank processes in the given epoch.
-    fn epoch_row_count(
+    pub fn epoch_row_count(
         &self,
         shuffle_config: ShuffleConfig,
         epoch: usize,

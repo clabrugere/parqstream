@@ -83,7 +83,7 @@ impl Buffer {
             return Ok(None);
         }
 
-        let data = self.data.as_ref().unwrap();
+        let data = self.data.as_ref().expect("data is Some after a successful refill");
         let length = num_rows.min(data.num_rows() - self.offset);
         let batch = data.slice(self.offset, length);
         self.offset += length;
