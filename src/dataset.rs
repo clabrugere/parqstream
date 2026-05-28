@@ -34,16 +34,13 @@ fn column_indices(schema: &SchemaRef, columns: &[String]) -> Result<Vec<usize>> 
 /// Build the projection mask and projected schema for the given column names, validating that they exist in the file schema.
 fn build_projection(
     parquet_file: &ParquetFile,
-    columns: Option<Vec<String>>,
-) -> Result<(SchemaRef, ProjectionMask, Vec<String>)> {
-    let schema = parquet_file.arrow_schema().clone();
-    let columns =
-        columns.unwrap_or_else(|| schema.fields().iter().map(|f| f.name().clone()).collect());
-    let col_indices = column_indices(&schema, &columns)?;
+    columns: &[String],
+) -> Result<(SchemaRef, ProjectionMask)> {
+    let schema = parquet_file.arrow_schema();
+    let col_indices = column_indices(schema, columns)?;
     let projected_schema = Arc::new(schema.project(&col_indices)?);
     let projection = ProjectionMask::roots(parquet_file.parquet_schema(), col_indices);
-
-    Ok((projected_schema, projection, columns))
+    Ok((projected_schema, projection))
 }
 
 /// Build a global row group index across all files, returning the total number of rows as well.
@@ -151,7 +148,7 @@ pub struct Dataset {
     pub files: Vec<ParquetFile>,
     pub columns: Vec<String>,
     pub projected_schema: SchemaRef,
-    pub projection: ProjectionMask,
+    pub projections: Vec<ProjectionMask>,
     pub row_group_index: Vec<RowGroupMeta>,
     pub total_rows: usize,
     pub identifier: u64,
@@ -160,23 +157,35 @@ pub struct Dataset {
 impl Dataset {
     /// Construct a single logical dataset from `paths`, while validating that all files share the same schema.
     pub fn from_paths(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
-        let mut files = Vec::with_capacity(paths.len());
+        let capacity = paths.len();
+        let mut files = Vec::with_capacity(capacity);
+        let mut projections = Vec::with_capacity(capacity);
         let mut paths = paths.into_iter();
 
-        // Read first file metadata to determine schema
+        // Read first file metadata to determine schema and resolve columns
         let first_path = paths.next().ok_or(Error::EmptyPaths)?;
-        let parquet_file = ParquetFile::load(&first_path)?;
+        let first_file = ParquetFile::load(&first_path)?;
+        let columns = columns.unwrap_or_else(|| {
+            first_file
+                .arrow_schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect()
+        });
+        let (projected_schema, first_projection) = build_projection(&first_file, &columns)?;
+        projections.push(first_projection);
+        files.push(first_file);
 
-        let (projected_schema, projection, columns) = build_projection(&parquet_file, columns)?;
-
-        files.push(parquet_file);
-
-        // Process remaining files, validating schema consistency
+        // Process remaining files, validating that the requested columns are present and type-compatible
         for path in paths {
             let parquet_file = ParquetFile::load(&path)?;
-            if parquet_file.arrow_schema().fields() != projected_schema.fields() {
-                return Err(Error::SchemaMismatch { path: path.into() });
+            let (file_projected_schema, file_projection) =
+                build_projection(&parquet_file, &columns)?;
+            if file_projected_schema.fields() != projected_schema.fields() {
+                return Err(Error::ColumnTypeMismatch { path: path.into() });
             }
+            projections.push(file_projection);
             files.push(parquet_file);
         }
 
@@ -189,7 +198,7 @@ impl Dataset {
             files,
             columns,
             projected_schema,
-            projection,
+            projections,
             row_group_index,
             total_rows,
             identifier,
@@ -219,7 +228,7 @@ impl Dataset {
             parquet_file.arrow_meta.clone(),
         )
         .with_row_groups(vec![row_group.idx])
-        .with_projection(self.projection.clone())
+        .with_projection(self.projections[row_group.file_idx].clone())
         .with_row_selection(RowSelection::from(selectors))
         .build()
         .map_err(|e| Error::BuildReader {
