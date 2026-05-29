@@ -97,6 +97,8 @@ pub struct RowGroupMeta {
 pub struct ParquetFile {
     pub path: PathBuf,
     pub arrow_meta: ArrowReaderMetadata,
+    /// Column projection applied when reading this file. Always `Some` inside a `Dataset`.
+    pub projection: Option<ProjectionMask>,
 }
 
 impl ParquetFile {
@@ -115,7 +117,12 @@ impl ParquetFile {
                 }
             })?;
 
-        Ok(Self { path, arrow_meta })
+        Ok(Self { path, arrow_meta, projection: None })
+    }
+
+    pub fn with_projection(mut self, projection: ProjectionMask) -> Self {
+        self.projection = Some(projection);
+        self
     }
 
     pub fn parquet_schema(&self) -> &SchemaDescriptor {
@@ -148,18 +155,15 @@ pub struct Dataset {
     pub files: Vec<ParquetFile>,
     pub columns: Vec<String>,
     pub projected_schema: SchemaRef,
-    pub projections: Vec<ProjectionMask>,
     pub row_group_index: Vec<RowGroupMeta>,
     pub total_rows: usize,
     pub identifier: u64,
 }
 
 impl Dataset {
-    /// Construct a single logical dataset from `paths`, while validating that all files share the same schema.
+    /// Construct a single logical dataset from `paths`, while validating that the requested columns are present and type-compatible across all files.
     pub fn from_paths(paths: Vec<String>, columns: Option<Vec<String>>) -> Result<Self> {
-        let capacity = paths.len();
-        let mut files = Vec::with_capacity(capacity);
-        let mut projections = Vec::with_capacity(capacity);
+        let mut files = Vec::with_capacity(paths.len());
         let mut paths = paths.into_iter();
 
         // Read first file metadata to determine schema and resolve columns
@@ -174,8 +178,7 @@ impl Dataset {
                 .collect()
         });
         let (projected_schema, first_projection) = build_projection(&first_file, &columns)?;
-        projections.push(first_projection);
-        files.push(first_file);
+        files.push(first_file.with_projection(first_projection));
 
         // Process remaining files, validating that the requested columns are present and type-compatible
         for path in paths {
@@ -185,8 +188,7 @@ impl Dataset {
             if file_projected_schema.fields() != projected_schema.fields() {
                 return Err(Error::ColumnTypeMismatch { path: path.into() });
             }
-            projections.push(file_projection);
-            files.push(parquet_file);
+            files.push(parquet_file.with_projection(file_projection));
         }
 
         // Index row groups across all files
@@ -198,7 +200,6 @@ impl Dataset {
             files,
             columns,
             projected_schema,
-            projections,
             row_group_index,
             total_rows,
             identifier,
@@ -228,7 +229,7 @@ impl Dataset {
             parquet_file.arrow_meta.clone(),
         )
         .with_row_groups(vec![row_group.idx])
-        .with_projection(self.projections[row_group.file_idx].clone())
+        .with_projection(parquet_file.projection.clone().expect("projection always set during Dataset construction"))
         .with_row_selection(RowSelection::from(selectors))
         .build()
         .map_err(|e| Error::BuildReader {

@@ -213,11 +213,11 @@ loader.load_state_dict(state["loader"])
 
 ### `Dataset(paths, columns=None)`
 
-Reads Parquet metadata from all files, validates that schemas match, and builds a global row-group index. No row data is loaded at this stage.
+Reads Parquet metadata from all files, validates that the requested columns are present and type-compatible across all files, and builds a global row-group index. No row data is loaded at this stage.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `paths` | `list[str]` | Paths to one or more Parquet files. All files must share the same schema. |
+| `paths` | `list[str]` | Paths to one or more Parquet files. All files must contain the requested columns with compatible types. |
 | `columns` | `list[str] \| None` | Column names to project. `None` loads all columns. |
 
 | Property | Description |
