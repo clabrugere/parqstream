@@ -89,6 +89,9 @@ pub enum Error {
     #[error("invalid checkpoint format: {0}")]
     InvalidCheckpointFormat(String),
 
+    #[error("a worker thread exited unexpectedly without sending a result")]
+    WorkerPanic,
+
     #[error("world_size must be >= 1, got {0}")]
     InvalidWorldSize(usize),
 

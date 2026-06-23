@@ -41,7 +41,7 @@ class DataLoader:
         prefetch_factor: Capacity of the batch channel; higher values pipeline
             more batches ahead of consumption.
         buffer_size: Number of rows to accumulate before slicing into batches.
-            If `None`, each row group is yielded as-is.
+            If `None`, accumulates a full epoch of rows (never fewer than `batch_size`).
         seed: Random seed for reproducible shuffling. Has no effect when
             `shuffle` is `False`.
         collate_fn: Optional callable that receives the raw `Batch` object and
@@ -66,7 +66,7 @@ class DataLoader:
         batch_size: int,
         num_steps: int | None = None,
         shuffle: bool = False,
-        num_workers: int = 1,
+        num_workers: int = 4,
         prefetch_factor: int = 1,
         buffer_size: int | None = None,
         seed: int | None = None,
