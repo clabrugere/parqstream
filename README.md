@@ -231,7 +231,7 @@ Reads Parquet metadata from all files, validates that the requested columns are 
 
 ### `DataLoader(dataset, batch_size, ...)`
 
-Iterator that yields batches. Internally spawns a multi-threaded pipeline: a task dispatcher thread, `num_workers` reader threads (off the GIL), a reorder thread, and a buffer assembler thread (concatenates chunks and shuffles). The main thread receives assembled buffers, stitches any unconsumed tail rows to the front, and slices into batches with the GIL released.
+Iterator that yields batches. Internally spawns a multi-threaded pipeline: a job dispatcher thread, `num_workers` reader threads (off the GIL), and a buffer assembler thread (concatenates chunks and shuffles). The main thread receives assembled buffers, stitches any unconsumed tail rows to the front, and slices into batches with the GIL released.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -295,16 +295,16 @@ Opaque object returned by `DataLoader.checkpoint()`. Captures training epoch, st
 ```
 Dataset ──► DataLoader
                │
-               ├── task_dispatcher   emits row-group read tasks (optionally shuffled per epoch)
+               ├── job_dispatcher    emits jobs (read task + result channel) optionally shuffled per epoch
                │
                ├── worker × N        reads and decodes chunks from disk, off the GIL
                │
-               ├── reorder_batch     restores dispatch order via a ring buffer (workers may finish out of order)
-               │
-               ├── buffer_builder    assembles ordered chunks into a buffer of buffer_size rows; shuffles it
+               ├── buffer_builder    assembles chunks (pulled in dispatch order via per-job channels) into a buffer of buffer_size rows; shuffles it
                │                     ↕ prefetch_factor assembled buffers queued ahead
                └── Buffer            stitches unconsumed tail rows to the front, slices into batch_size batches, off the GIL
 ```
+
+**Ordering guarantee.** Workers finish jobs in arbitrary order, but `buffer_builder` always consumes chunks in dispatch order. This is structurally enforced: `job_dispatcher` creates a single-use `bounded(1)` channel per job and immediately enqueues the receiver into a FIFO `pending` channel before any worker touches the job. `buffer_builder` drains `pending` in order, blocking on each job's dedicated receiver before moving to the next. A fast worker completing job N+1 before job N simply deposits its result into N+1's channel, where it waits until N has been consumed.
 
 Columns are returned to Python via the Arrow PyCapsule Interface: zero-copy for dense numeric types, one copy otherwise.
 

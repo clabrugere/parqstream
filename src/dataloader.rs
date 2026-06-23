@@ -11,9 +11,7 @@ use crate::checkpoint::{Checkpoint, CheckpointCursor};
 use crate::dataset::Dataset;
 use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
-use crate::pipeline::{
-    buffer_builder, chunk_reader, reorder_batch, task_dispatcher, ReadTask, StreamCursor,
-};
+use crate::pipeline::{buffer_builder, chunk_reader, job_dispatcher, Job, StreamCursor};
 
 #[derive(Debug, Copy, Clone)]
 pub struct DataLoaderConfig {
@@ -90,19 +88,17 @@ pub struct DataLoaderState {
     pub rows_epoch_start: usize, // 0 for fresh runs, cursor.rows_epoch_start on resume
 }
 
-
 /// Dataloader with prefetching.
 ///
 /// Calling `__iter__` (or iterating with a for loop) starts:
-/// 1. a thread that emits row-group metadata read tasks to a task channel ([`task_dispatcher`])
-/// 2. `num_workers` threads that receive tasks, load chunks from disk and send them to a data channel ([`chunk_reader`])
-/// 3. a thread that reorders completed chunks back into dispatch order using a ring buffer ([`reorder_batch`])
-/// 4. a thread that accumulates ordered chunks until it has >= `buffer_size` rows, concatenates
+/// 1. a thread that emits row-group metadata read tasks and an associated result channel to a job channel ([`job_dispatcher`])
+/// 2. `num_workers` threads that receive jobs, load chunks from disk and send results to the job's result channel ([`chunk_reader`])
+/// 3. a thread that accumulates chunks pulled from the pending receiver FIFO queue until it has >= `buffer_size` rows, concatenates
 ///    and optionally shuffles them, and sends the assembled buffer ([`buffer_builder`])
-/// 5. the main thread receives assembled buffers, stitches any unconsumed tail rows to the front,
+/// 4. the main thread receives assembled buffers, stitches any unconsumed tail rows to the front,
 ///    and slices into `batch_size` batches; the GIL is released for the entire operation
 ///
-/// Up to `prefetch_factor` assembled buffers can be queued between stages 4 and 5.
+/// Up to `prefetch_factor` assembled buffers can be queued between stages 3 and 4.
 ///
 /// If set, the iterator runs for exactly `num_steps` batches, then raises `StopIteration`.
 /// Dropping or garbage-collecting the [`DataLoader`] signals the background threads to stop early.
@@ -145,18 +141,18 @@ impl DataLoader {
             .collect::<Vec<_>>();
 
         // Declare all the channels
-        let (task_tx, task_rx) = bounded::<ReadTask>(self.config.num_workers * 2);
-        let (batch_tx, batch_rx) =
-            bounded::<Result<(usize, RecordBatch)>>(self.config.num_workers + 2);
-        let (ordered_tx, ordered_rx) = bounded::<Result<RecordBatch>>(self.config.num_workers + 2);
+        let (job_tx, job_rx) = bounded::<Job>(self.config.num_workers * 2);
+        let (pending_tx, pending_rx) =
+            bounded::<Receiver<Result<RecordBatch>>>(self.config.num_workers * 2);
         let (buffer_tx, buffer_rx) = bounded::<Result<RecordBatch>>(self.config.prefetch_factor);
 
-        // Prepare and sends read tasks to workers
+        // Prepare and sends jobs to workers
         let dist_config = self.dist_config;
         let stream_cursor = StreamCursor::from(cursor);
         thread::spawn(move || {
-            task_dispatcher(
-                &task_tx,
+            job_dispatcher(
+                &job_tx,
+                &pending_tx,
                 &row_group_lengths,
                 chunk_size,
                 stream_cursor,
@@ -167,24 +163,18 @@ impl DataLoader {
 
         // Workers read a contiguous chunk from a row group
         for _ in 0..self.config.num_workers {
-            let task_rx = task_rx.clone();
-            let batch_tx = batch_tx.clone();
+            let job_rx = job_rx.clone();
             let dataset = dataset.clone();
-            thread::spawn(move || chunk_reader(&task_rx, &batch_tx, &dataset));
+            thread::spawn(move || chunk_reader(&job_rx, &dataset));
         }
-        drop(batch_tx); // original instance wasn't moved, so drop it to avoid a leak
-
-        // Reorder out-of-order batches by dispatch id before they reach the buffer builder.
-        // Capacity matches the total in-flight budget (task_tx + workers + batch_tx) so no slot is ever reused.
-        let capacity = 4 * self.config.num_workers + 2;
-        thread::spawn(move || reorder_batch(&batch_rx, &ordered_tx, capacity));
+        drop(job_rx); // original instance wasn't moved into a worker; drop it so workers see channel closure and can exit
 
         // Collect chunks until > buffer_size rows, then concatenate and send to the buffer builder.
         let schema = dataset.projected_schema.clone();
         let seed_offset = cursor.refill_count;
         thread::spawn(move || {
             buffer_builder(
-                &ordered_rx,
+                &pending_rx,
                 &buffer_tx,
                 &schema,
                 buffer_size,
@@ -203,14 +193,14 @@ impl DataLoader {
     #[pyo3(signature = (
         dataset,
         batch_size,
-        num_steps = None,
-        shuffle = false,
-        num_workers = 4,
-        prefetch_factor = 1,
-        buffer_size = None,
-        seed = None,
-        rank = 0,
-        world_size = 1,
+        num_steps,
+        shuffle,
+        num_workers,
+        prefetch_factor,
+        buffer_size,
+        seed,
+        rank,
+        world_size,
     ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
