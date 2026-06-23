@@ -312,7 +312,9 @@ Columns are returned to Python via the Arrow PyCapsule Interface: zero-copy for 
 
 ## Benchmarks
 
-Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 float32 columns, ~2 GB on disk), `prefetch_factor=1`, `buffer_size=1_000_000`. Results are slightly optimistic due to OS page cache warmup.
+Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 float32 columns, ~2 GB on disk), `prefetch_factor=2`, `buffer_size=1_000_000`. Each cell is the mean of 5 runs after a warmup pass.
+
+> The numbers below are pending regeneration with the current benchmark (mean ± SE, prefetch sweep). Re-run `bash benchmarks/run.sh` and refresh from the emitted JSON.
 
 **Sequential**
 
@@ -334,7 +336,15 @@ Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 fl
 | 8192  | 36.1M rows/s | 54.2M rows/s | 55.7M rows/s | 44.9M rows/s |
 | 16384 | 35.3M rows/s | 53.2M rows/s | **56.6M rows/s** | 46.5M rows/s |
 
-**GPU training** (NVIDIA A10G, 10M rows × 16 shards, 100 float32 features, 10 classes)
+**Prefetch factor** (sequential, peak config `bs=16384, w=4`), buffers queued ahead of consumption, trading memory for IO overlap.
+
+| prefetch_factor | rows/s |
+|:---------------:|:------:|
+| 1 | _tbd_ |
+| 2 | _tbd_ |
+| 4 | _tbd_ |
+
+**GPU training** (NVIDIA A10G, 10M rows x 16 shards, 100 float32 features, 10 classes)
 
 135M-parameter MLP (100 → 8192 → 8192 → 8192 → 10), batch size 65 536, 8 workers, shuffled.
 
