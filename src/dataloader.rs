@@ -11,7 +11,7 @@ use crate::checkpoint::{Checkpoint, CheckpointCursor};
 use crate::dataset::Dataset;
 use crate::distributed::DistributedConfig;
 use crate::error::{Error, Result};
-use crate::pipeline::{buffer_builder, chunk_reader, job_dispatcher, Job, StreamCursor};
+use crate::pipeline::{buffer_builder, chunk_reader, job_dispatcher, Job};
 
 #[derive(Debug, Copy, Clone)]
 pub struct DataLoaderConfig {
@@ -148,14 +148,14 @@ impl DataLoader {
 
         // Prepare and sends jobs to workers
         let dist_config = self.dist_config;
-        let stream_cursor = StreamCursor::from(cursor);
+        let position = cursor.stream_pos;
         thread::spawn(move || {
             job_dispatcher(
                 &job_tx,
                 &pending_tx,
                 &row_group_lengths,
                 chunk_size,
-                stream_cursor,
+                position,
                 shuffle_config,
                 dist_config,
             );
@@ -171,7 +171,7 @@ impl DataLoader {
 
         // Collect chunks until > buffer_size rows, then concatenate and send to the buffer builder.
         let schema = dataset.projected_schema.clone();
-        let seed_offset = cursor.refill_count;
+        let refill_count = cursor.buffer_pos.refill_count;
         thread::spawn(move || {
             buffer_builder(
                 &pending_rx,
@@ -179,7 +179,7 @@ impl DataLoader {
                 &schema,
                 buffer_size,
                 shuffle_config,
-                seed_offset,
+                refill_count,
             );
         });
 
@@ -263,7 +263,7 @@ impl DataLoader {
             seed,
         };
         let buffer_rx = slf.spawn_pipeline(shuffle_config, &cursor);
-        let buffer = Buffer::new(buffer_rx, cursor.refill_count, cursor.buffer_offset);
+        let buffer = Buffer::new(buffer_rx, cursor.buffer_pos);
 
         slf.state = DataLoaderState {
             epoch: slf.state.epoch,
