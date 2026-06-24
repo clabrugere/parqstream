@@ -44,13 +44,15 @@ fn build_projection(
 }
 
 /// Build a global row group index across all files, returning the total number of rows as well.
-fn build_row_group_index(files: &[ParquetFile]) -> Result<(Vec<RowGroupMeta>, usize)> {
+fn build_row_group_index(
+    projected_files: &[ProjectedParquetFile],
+) -> Result<(Vec<RowGroupMeta>, usize)> {
     let mut row_group_index = Vec::new();
     let mut total_rows = 0;
 
-    for (file_idx, parquet_file) in files.iter().enumerate() {
-        for row_group_idx in 0..parquet_file.num_row_groups() {
-            let num_rows = parquet_file.num_rows(row_group_idx)?;
+    for (file_idx, ProjectedParquetFile { file, .. }) in projected_files.iter().enumerate() {
+        for row_group_idx in 0..file.num_row_groups() {
+            let num_rows = file.num_rows(row_group_idx)?;
             row_group_index.push(RowGroupMeta {
                 file_idx,
                 idx: row_group_idx,
@@ -66,13 +68,13 @@ fn build_row_group_index(files: &[ParquetFile]) -> Result<(Vec<RowGroupMeta>, us
 
 /// Compute a hash of the dataset definition to use as an identifier, allowing dataloader and checkpoints to verify compatibility.
 fn hash_dataset(
-    files: &[ParquetFile],
+    files: &[ProjectedParquetFile],
     columns: &[String],
     num_row_groups: usize,
     num_rows: usize,
 ) -> u64 {
     let mut hasher = AHasher::default();
-    for file in files {
+    for ProjectedParquetFile { file, .. } in files {
         file.path.hash(&mut hasher);
     }
     for column in columns {
@@ -97,8 +99,6 @@ pub struct RowGroupMeta {
 pub struct ParquetFile {
     pub path: PathBuf,
     pub arrow_meta: ArrowReaderMetadata,
-    /// Column projection applied when reading this file. Always `Some` inside a `Dataset`.
-    pub projection: Option<ProjectionMask>,
 }
 
 impl ParquetFile {
@@ -117,12 +117,7 @@ impl ParquetFile {
                 }
             })?;
 
-        Ok(Self { path, arrow_meta, projection: None })
-    }
-
-    pub fn with_projection(mut self, projection: ProjectionMask) -> Self {
-        self.projection = Some(projection);
-        self
+        Ok(Self { path, arrow_meta })
     }
 
     pub fn parquet_schema(&self) -> &SchemaDescriptor {
@@ -147,12 +142,19 @@ impl ParquetFile {
     }
 }
 
+/// Wrap a Parquet file and its projection mask, representing a logical view of the file with only the requested columns.
+#[derive(Debug, Clone)]
+pub struct ProjectedParquetFile {
+    pub file: ParquetFile,
+    pub projection: ProjectionMask,
+}
+
 /// Logical view over one or more Parquet files with a shared schema. Footer metadata is loaded at
 /// construction; row data is read on demand via [`Dataset::read_row_group_range`].
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct Dataset {
-    pub files: Vec<ParquetFile>,
+    pub files: Vec<ProjectedParquetFile>,
     pub columns: Vec<String>,
     pub projected_schema: SchemaRef,
     pub row_group_index: Vec<RowGroupMeta>,
@@ -178,7 +180,10 @@ impl Dataset {
                 .collect()
         });
         let (projected_schema, first_projection) = build_projection(&first_file, &columns)?;
-        files.push(first_file.with_projection(first_projection));
+        files.push(ProjectedParquetFile {
+            file: first_file,
+            projection: first_projection,
+        });
 
         // Process remaining files, validating that the requested columns are present and type-compatible
         for path in paths {
@@ -188,7 +193,10 @@ impl Dataset {
             if file_projected_schema.fields() != projected_schema.fields() {
                 return Err(Error::ColumnTypeMismatch { path: path.into() });
             }
-            files.push(parquet_file.with_projection(file_projection));
+            files.push(ProjectedParquetFile {
+                file: parquet_file,
+                projection: file_projection,
+            });
         }
 
         // Index row groups across all files
@@ -213,9 +221,10 @@ impl Dataset {
         start: usize,
         len: usize,
     ) -> Result<RecordBatch> {
-        let parquet_file = &self.files[row_group.file_idx];
-        let path = parquet_file.path.clone();
-        let file = File::open(&path).map_err(|e| Error::OpenFile { path, source: e })?;
+        let ProjectedParquetFile {
+            file: parquet_file,
+            projection,
+        } = &self.files[row_group.file_idx];
 
         // Skip first `start` rows and read `len` following rows
         let mut selectors = Vec::with_capacity(2);
@@ -224,12 +233,16 @@ impl Dataset {
         }
         selectors.push(RowSelector::select(len));
 
+        let input_file = File::open(&parquet_file.path).map_err(|e| Error::OpenFile {
+            path: parquet_file.path.clone(),
+            source: e,
+        })?;
         let parts = ParquetRecordBatchReaderBuilder::new_with_metadata(
-            file,
+            input_file,
             parquet_file.arrow_meta.clone(),
         )
         .with_row_groups(vec![row_group.idx])
-        .with_projection(parquet_file.projection.clone().expect("projection always set during Dataset construction"))
+        .with_projection(projection.clone())
         .with_row_selection(RowSelection::from(selectors))
         .build()
         .map_err(|e| Error::BuildReader {
@@ -279,7 +292,11 @@ impl Dataset {
     }
 
     pub fn __repr__(&self) -> String {
-        let paths: Vec<_> = self.files.iter().map(|f| &f.path).collect();
+        let paths: Vec<_> = self
+            .files
+            .iter()
+            .map(|ProjectedParquetFile { file, .. }| &file.path)
+            .collect();
         format!(
             "Dataset(files={:?}, rows={}, columns={:?})",
             paths, self.total_rows, self.columns,

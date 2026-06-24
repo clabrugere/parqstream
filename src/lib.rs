@@ -6,6 +6,7 @@ mod dataset;
 mod distributed;
 mod error;
 mod pipeline;
+mod position;
 
 use pyo3::prelude::*;
 
