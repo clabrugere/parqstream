@@ -22,9 +22,10 @@ def run(dataset: Dataset, buffer_size: int, repeats: int) -> dict:
     results = {}
 
     # Warmup pass
-    logger.info("warming page cache...")
+    logger.info("warmup...")
     measure_once(DataLoader(dataset, batch_size=BATCH_SIZES[-1], num_steps=max(total_rows // BATCH_SIZES[-1], 1)))
 
+    logger.info(f"measuring throughput for {total_rows:,} rows, buffer_size={buffer_size:,}, repeats={repeats}")
     for shuffle in [False, True]:
         mode = "shuffled" if shuffle else "sequential"
         results[mode] = {}
