@@ -312,29 +312,49 @@ Columns are returned to Python via the Arrow PyCapsule Interface: zero-copy for 
 
 ## Benchmarks
 
-Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 float32 columns, ~2 GB on disk), `prefetch_factor=1`, `buffer_size=1_000_000`. Results are slightly optimistic due to OS page cache warmup.
+Measured on a MacBook Pro M3, 50M rows across 16 Parquet shards (1 int32 + 10 float32 columns, ~2 GB on disk), `buffer_size=1_000_000`. Each cell is the `mean ± SE` over 5 runs (M rows/s) after a warmup pass.
 
 **Sequential**
 
-| batch_size | 1 worker | 2 workers | 4 workers | 8 workers |
-|:----------:|:--------:|:---------:|:---------:|:---------:|
-| 1024  | 38.9M rows/s | 49.7M rows/s | 48.3M rows/s | 35.8M rows/s |
-| 2048  | 39.4M rows/s | 58.5M rows/s | 75.5M rows/s | 58.6M rows/s |
-| 4096  | 37.9M rows/s | 59.7M rows/s | 77.3M rows/s | 61.6M rows/s |
-| 8192  | 38.9M rows/s | 55.5M rows/s | 68.9M rows/s | 56.9M rows/s |
-| 16384 | 39.0M rows/s | 58.9M rows/s | **78.5M rows/s** | 58.1M rows/s |
+| batch_size | prefetch | 1 worker | 2 workers | 4 workers | 8 workers |
+|:----------:|:--:|:--------:|:---------:|:---------:|:---------:|
+| 1024  | 1 | 35.3 ± 1.4 | 49.8 ± 0.2 | 47.2 ± 0.4 | 39.6 ± 0.4 |
+|       | 2 | 36.8 ± 0.2 | 49.7 ± 0.2 | 47.6 ± 0.3 | 38.4 ± 0.3 |
+|       | 4 | 36.7 ± 0.2 | 49.9 ± 0.1 | 47.2 ± 0.2 | 36.5 ± 0.6 |
+| 2048  | 1 | 36.1 ± 0.2 | 57.5 ± 0.6 | 74.5 ± 1.2 | 51.0 ± 2.0 |
+|       | 2 | 37.3 ± 0.2 | 57.9 ± 0.1 | 73.0 ± 0.3 | 56.7 ± 0.7 |
+|       | 4 | 37.4 ± 0.1 | 57.8 ± 0.3 | 61.5 ± 2.6 | 57.8 ± 1.0 |
+| 4096  | 1 | 36.1 ± 0.3 | 55.9 ± 0.7 | 71.3 ± 1.2 | 59.7 ± 1.0 |
+|       | 2 | 36.5 ± 0.2 | 55.4 ± 1.2 | 72.9 ± 0.6 | 59.9 ± 0.3 |
+|       | 4 | 36.6 ± 0.3 | 55.6 ± 0.6 | 72.3 ± 0.5 | 60.8 ± 0.3 |
+| 8192  | 1 | 36.9 ± 0.2 | 57.7 ± 0.6 | 73.5 ± 0.3 | 59.1 ± 0.4 |
+|       | 2 | 37.6 ± 0.1 | 57.7 ± 0.3 | 74.8 ± 0.8 | 58.8 ± 0.8 |
+|       | 4 | 37.5 ± 0.2 | 57.6 ± 0.4 | 75.2 ± 1.1 | 60.7 ± 0.4 |
+| 16384 | 1 | 37.0 ± 0.2 | 58.3 ± 0.3 | 73.9 ± 1.4 | 62.2 ± 0.2 |
+|       | 2 | 37.4 ± 0.1 | 58.7 ± 0.2 | **75.7 ± 0.3** | 61.0 ± 0.2 |
+|       | 4 | 37.3 ± 0.1 | 57.9 ± 0.2 | 74.1 ± 0.7 | 61.4 ± 0.6 |
 
 **Shuffled** (row-group order + buffer shuffle)
 
-| batch_size | 1 worker | 2 workers | 4 workers | 8 workers |
-|:----------:|:--------:|:---------:|:---------:|:---------:|
-| 1024  | 35.8M rows/s | 48.7M rows/s | 45.6M rows/s | 37.8M rows/s |
-| 2048  | 34.5M rows/s | 51.5M rows/s | 52.9M rows/s | 43.0M rows/s |
-| 4096  | 36.5M rows/s | 54.5M rows/s | 55.6M rows/s | 43.2M rows/s |
-| 8192  | 36.1M rows/s | 54.2M rows/s | 55.7M rows/s | 44.9M rows/s |
-| 16384 | 35.3M rows/s | 53.2M rows/s | **56.6M rows/s** | 46.5M rows/s |
+| batch_size | prefetch | 1 worker | 2 workers | 4 workers | 8 workers |
+|:----------:|:--:|:--------:|:---------:|:---------:|:---------:|
+| 1024  | 1 | 35.0 ± 0.2 | 48.4 ± 0.1 | 45.2 ± 0.4 | 37.6 ± 0.1 |
+|       | 2 | 35.6 ± 0.2 | 48.4 ± 0.2 | 45.2 ± 0.2 | 37.6 ± 0.2 |
+|       | 4 | 35.3 ± 0.2 | 48.4 ± 0.2 | 45.3 ± 0.3 | 37.3 ± 0.3 |
+| 2048  | 1 | 35.3 ± 0.2 | 53.2 ± 0.1 | 55.7 ± 0.5 | 43.1 ± 0.6 |
+|       | 2 | 35.2 ± 0.2 | 53.7 ± 0.5 | 55.2 ± 0.4 | 39.9 ± 1.5 |
+|       | 4 | 35.6 ± 0.2 | 53.0 ± 0.4 | 53.9 ± 0.6 | 42.4 ± 1.1 |
+| 4096  | 1 | 35.7 ± 0.1 | 51.8 ± 0.3 | 54.3 ± 0.7 | 39.2 ± 0.8 |
+|       | 2 | 32.6 ± 1.8 | 52.5 ± 0.2 | 52.2 ± 0.7 | 38.8 ± 1.0 |
+|       | 4 | 33.5 ± 0.3 | 52.8 ± 0.3 | 46.5 ± 2.4 | 36.0 ± 2.7 |
+| 8192  | 1 | 34.0 ± 0.5 | 54.5 ± 0.7 | 54.5 ± 0.7 | 44.8 ± 0.7 |
+|       | 2 | 36.2 ± 0.1 | 51.5 ± 0.9 | 54.3 ± 1.5 | 43.7 ± 0.2 |
+|       | 4 | 36.5 ± 0.1 | 49.0 ± 1.5 | 55.1 ± 0.4 | 43.4 ± 0.5 |
+| 16384 | 1 | 35.5 ± 0.2 | 52.9 ± 0.7 | 55.4 ± 0.7 | 37.6 ± 2.1 |
+|       | 2 | 35.6 ± 0.2 | 54.3 ± 0.3 | **56.3 ± 0.3** | 37.0 ± 1.7 |
+|       | 4 | 35.7 ± 0.3 | 53.5 ± 0.3 | 52.8 ± 2.1 | 42.7 ± 1.2 |
 
-**GPU training** (NVIDIA A10G, 10M rows × 16 shards, 100 float32 features, 10 classes)
+**GPU training** (NVIDIA A10G, 10M rows x 16 shards, 100 float32 features, 10 classes)
 
 135M-parameter MLP (100 → 8192 → 8192 → 8192 → 10), batch size 65 536, 8 workers, shuffled.
 
